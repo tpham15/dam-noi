@@ -679,12 +679,12 @@ export default function App() {
       });
       const stripQ = (s) => String(s || "").trim().replace(/^["'“”]+|["'“”]+$/g, "").trim();
       const en = stripQ(r.next_en);
-      // Client guard: only show the Vietnamese correction when the model actually
-      // flagged an error (errorsThisTurn>0) AND it returned a non-empty roast_vi.
-      // Correct English => no Vietnamese, no roast. Belt-and-suspenders on top of the prompt.
+      // The roast (Vietnamese correction) only shows when there's a real error.
+      // But the translation (vi) of Toki's English line should ALWAYS be available,
+      // so the "Dịch" button stays whether or not the user made a mistake.
       const hasErr = Number(r.errorsThisTurn || 0) > 0 && String(r.roast_vi || "").trim() !== "";
       const roast = hasErr ? stripQ(r.roast_vi) : "";
-      setUi((p) => [...p, { who: "t", roast, en, vi: hasErr ? (r.vi_translation || "") : "", enc: r.encouragement }]);
+      setUi((p) => [...p, { who: "t", roast, en, vi: stripQ(r.vi_translation), enc: r.encouragement }]);
       setChips(r.scaffold_chips || []);
       if (typeof r.streakDays === "number") setStreak(r.streakDays);
       if (r.errorsThisTurn) setErrorCount((c) => c + r.errorsThisTurn);
@@ -841,9 +841,9 @@ export default function App() {
           {screen === "welcome" && (
             <div className="welcome">
               <Toki size="lg" />
-              <h1 className="disp">MOHO AI</h1>
-              <p className="tag">Practice English with AI</p>
-              <p className="promise disp">""Talk to me in English or <br/> I'll laugh at you in Vietnamese."</p>
+              <h1 className="disp">Dám Nói</h1>
+              <p className="tag">nói tiếng Anh, không sợ sai</p>
+              <p className="promise disp">"Cứ nói đi.<br/>Đừng sợ sai."</p>
               <button className="cta" onClick={() => setScreen(getJob() ? "home" : "job")}>Bắt đầu</button>
               <p className="fine">Toki nói tiếng Anh · bí từ cứ chêm tiếng Việt</p>
             </div>
@@ -869,8 +869,8 @@ export default function App() {
           {screen === "home" && (
             <>
               <div className="home-h">
-                <div className="hi">Try to be a little better everyday </div>
-                <h2 className="disp">Welcome back nha ní 👋</h2>
+                <div className="hi">Hôm nay muốn nói gì nào?</div>
+                <h2 className="disp">Chào ní 👋</h2>
                 <div className="streakbar">
                   <button className="pill fire tap" onClick={openProgress}><Flame size={15} /> {streak} ngày</button>
                   <button className="pill book tap" onClick={openVocab}><BookOpen size={15} /> Sổ từ vựng</button>
@@ -1110,7 +1110,7 @@ export default function App() {
                     <Toki size="sm" />
                     <div>
                       <div className="bragname">Sổ phốt tiếng Anh</div>
-                      <div className="bragsub">by MoHo AI 🔥</div>
+                      <div className="bragsub">by Dám Nói 🔥</div>
                     </div>
                   </div>
                   <div className="bragstats">
@@ -1125,7 +1125,7 @@ export default function App() {
                       ))}
                     </div>
                   )}
-                  <div className="bragfoot">"Nói sai cũng được, miễn là DÁM BẮT ĐẦU" 💪</div>
+                  <div className="bragfoot">"Nói sai cũng được, miễn là DÁM NÓI" 💪</div>
                 </div>
                 <button className="pri" style={{ marginTop: 16, width: "100%" }} onClick={copyBrag}>Sao chép caption khoe 📋</button>
               </div>
