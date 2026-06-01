@@ -350,11 +350,12 @@ const STYLE = `
 .phone{width:100%;max-width:420px;background:var(--paper);border:1px solid var(--line);border-radius:34px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 30px 70px -30px rgba(0,0,0,.6);min-height:640px;max-height:780px;position:relative;}
 
 /* mascot */
-.toki{border-radius:50%;position:relative;flex:none;overflow:hidden;background:transparent;}
-.toki-img{width:100%;height:100%;object-fit:cover;display:block;}
-.toki.lg{width:88px;height:88px;animation:breathe 4.5s ease-in-out infinite;}
-.toki.sm{width:38px;height:38px;}
-.toki.md{width:64px;height:64px;}
+.toki{position:relative;flex:none;background:transparent;display:flex;align-items:center;justify-content:center;}
+.toki:before{content:"";position:absolute;inset:-18%;border-radius:50%;background:radial-gradient(circle at 50% 45%, rgba(255,94,58,.55), rgba(193,58,237,.35) 45%, transparent 70%);filter:blur(10px);z-index:0;pointer-events:none;}
+.toki-img{position:relative;z-index:1;width:100%;height:100%;object-fit:contain;display:block;}
+.toki.lg{width:96px;height:96px;animation:breathe 4.5s ease-in-out infinite;}
+.toki.sm{width:40px;height:40px;}
+.toki.md{width:68px;height:68px;}
 .share{background:var(--coral);color:#fff;border:none;font-family:'Space Grotesk',sans-serif;font-weight:800;font-size:15px;padding:13px;border-radius:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;}
 .bragcard{background:linear-gradient(150deg,#2A2436,#231C28);border:2px solid #FF5E3A55;border-radius:22px;padding:20px;margin-top:6px;}
 .bragtop{display:flex;align-items:center;gap:12px;}
@@ -367,7 +368,7 @@ const STYLE = `
 .braglist{display:flex;flex-direction:column;gap:7px;}
 .bragerr{font-size:14px;font-weight:700;color:var(--ink);}.bragerr s{color:var(--muted);}.bragerr b{color:var(--green-d);}
 .bragfoot{margin-top:15px;text-align:center;font-style:italic;font-weight:700;color:var(--coral);font-size:14.5px;}
-.toki.sm:before,.toki.sm:after,.toki.sm i,.toki:before,.toki:after,.toki i{display:none;}
+.toki.sm:after,.toki.sm i,.toki:after,.toki i{display:none;}
 @keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
 
 /* welcome */
