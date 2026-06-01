@@ -843,8 +843,8 @@ export default function App() {
             <div className="welcome">
               <Toki size="lg" />
               <h1 className="disp">Dám Nói</h1>
-              <p className="tag">nói tiếng Anh, không sợ sai</p>
-              <p className="promise disp">"Cứ nói đi.<br/>Đừng sợ sai."</p>
+              <p className="tag">Dare to speak</p>
+              <p className="promise disp">"Cứ nói đại.<br/>Đừng sợ sai."</p>
               <button className="cta" onClick={() => setScreen(getJob() ? "home" : "job")}>Bắt đầu</button>
               <p className="fine">Toki nói tiếng Anh · bí từ cứ chêm tiếng Việt</p>
             </div>
