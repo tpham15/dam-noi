@@ -20,9 +20,11 @@ const TOKI_TOOL = {
   input_schema: {
     type: "object",
     additionalProperties: false,
-    required: ["spoken_reply", "vi_translation", "scaffold_chips", "errors_noticed", "used_vietnamese", "encouragement"],
+    required: ["roast_vi", "teach_en", "next_en", "vi_translation", "scaffold_chips", "errors_noticed", "used_vietnamese", "encouragement", "vocab"],
     properties: {
-      spoken_reply: { type: "string" },
+      roast_vi: { type: "string" },
+      teach_en: { type: "string" },
+      next_en: { type: "string" },
       vi_translation: { type: "string" },
       scaffold_chips: { type: "array", items: { type: "string" } },
       errors_noticed: {
@@ -40,11 +42,40 @@ const TOKI_TOOL = {
       },
       used_vietnamese: { type: "boolean" },
       encouragement: { type: "string" },
+      vocab: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["word", "meaning_vi", "example_en"],
+          properties: {
+            word: { type: "string" },
+            meaning_vi: { type: "string" },
+            example_en: { type: "string" },
+          },
+        },
+      },
     },
   },
 };
 
+// Cap conversation length to keep input-token cost low on long sessions.
+// Always keep the first turn (the [SESSION_START] anchor that holds the topic/role),
+// then keep only the most recent MAX_RECENT turns. The system prompt is separate
+// and never trimmed.
+const MAX_RECENT = parseInt(process.env.TOKI_MAX_RECENT || "16", 10); // ~8 back-and-forth exchanges
+function trimHistory(messages) {
+  if (!Array.isArray(messages) || messages.length <= MAX_RECENT + 1) return messages;
+  const anchor = messages[0];                 // [SESSION_START] ... keeps topic/role context
+  const recent = messages.slice(-MAX_RECENT);  // most recent turns
+  // Anthropic requires the first message to be role 'user'. The anchor is a user
+  // turn, so prepend it; if the recent slice happens to start with an assistant
+  // turn, the leading user anchor still satisfies the constraint.
+  return [anchor, ...recent];
+}
+
 async function askToki({ system, messages }) {
+  const trimmed = trimHistory(messages);
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -58,7 +89,7 @@ async function askToki({ system, messages }) {
       system,
       tools: [TOKI_TOOL],
       tool_choice: { type: "tool", name: "toki_reply" },
-      messages,
+      messages: trimmed,
     }),
   });
   if (!res.ok) throw new Error(`anthropic ${res.status}: ${await res.text()}`);
@@ -67,12 +98,15 @@ async function askToki({ system, messages }) {
   if (!block) throw new Error("no tool_use block");
   const r = block.input;
   return {
-    spoken_reply: r.spoken_reply || "Sorry, say that again?",
+    roast_vi: r.roast_vi || "",
+    teach_en: r.teach_en || "",
+    next_en: r.next_en || "Tell me more — what happened next?",
     vi_translation: r.vi_translation || "",
     scaffold_chips: (r.scaffold_chips || []).slice(0, 4),
     errors_noticed: r.errors_noticed || [],
     used_vietnamese: !!r.used_vietnamese,
     encouragement: r.encouragement || "",
+    vocab: Array.isArray(r.vocab) ? r.vocab.slice(0, 3) : [],
   };
 }
 
@@ -83,17 +117,22 @@ function countWords(s) {
 // ---- POST /api/session/start : create or resume a user, open a session ----
 app.post("/api/session/start", (req, res) => {
   try {
-    const { userId } = req.body || {};
+    const { userId, topicSeed, greeting, job } = req.body || {};
     const s = db.startSession(userId);
-    // seed the opening greeting into history
-    db.logTurn(s.sessionId, "user", `[SESSION_START] session_number=${s.sessionNumber} confidence=${s.confidenceLevel}`);
-    db.logTurn(s.sessionId, "assistant", OPENING);
+    if (job) { try { db.setJob(s.userId, job); } catch {} }
+    const opener = greeting || OPENING;
+    // seed the session anchor (topic/role) + opening greeting into history
+    const anchor = topicSeed
+      ? `[SESSION_START] ${topicSeed} session_number=${s.sessionNumber} confidence=${s.confidenceLevel}`
+      : `[SESSION_START] session_number=${s.sessionNumber} confidence=${s.confidenceLevel}`;
+    db.logTurn(s.sessionId, "user", anchor);
+    db.logTurn(s.sessionId, "assistant", opener);
     res.json({
       userId: s.userId,
       sessionId: s.sessionId,
       sessionNumber: s.sessionNumber,
       streakDays: s.streakDays,
-      greeting: OPENING,
+      greeting: opener,
     });
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
@@ -123,29 +162,38 @@ app.post("/api/turn", async (req, res) => {
       sessionNumber: session.session_number,
       confidenceLevel: user.confidence_level,
       streakDays: user.streak_days,
+      weaknesses: db.getWeaknesses(userId),
+      job: user.job,
     });
     const messages = db.historyFor(sessionId);
 
     const reply = await askToki({ system, messages });
 
-    db.logTurn(sessionId, "assistant", reply.spoken_reply);
+    // Store a combined assistant turn so history stays coherent for the model.
+    const combined = [reply.roast_vi, reply.teach_en, reply.next_en].filter(Boolean).join(" ");
+    db.logTurn(sessionId, "assistant", combined);
     db.logErrors(userId, sessionId, reply.errors_noticed); // hidden, for review only
+    if (reply.vocab && reply.vocab.length) db.saveVocab(userId, reply.vocab); // notebook
 
-    // errors_noticed is intentionally NOT returned in the live payload by default,
-    // mirroring the design (invisible during conversation). The client fetches them
-    // via /api/review when the user opts in.
     res.json({
-      spoken_reply: reply.spoken_reply,
+      roast_vi: reply.roast_vi,
+      teach_en: reply.teach_en,
+      next_en: reply.next_en,
       vi_translation: reply.vi_translation,
       scaffold_chips: reply.scaffold_chips,
       used_vietnamese: reply.used_vietnamese,
       encouragement: reply.encouragement,
       streakDays: user.streak_days,
+      errorsThisTurn: (reply.errors_noticed || []).length,
+      vocabThisTurn: (reply.vocab || []).length,
     });
   } catch (e) {
     // graceful fallback so the session never crashes
     res.json({
-      spoken_reply: "Hmm, I didn't catch that — but no worries. Tell me one small thing about your day?",
+      roast_vi: "Ơ, mạng lag hay sao á, nói lại giúp mình cái nào!",
+      teach_en: "",
+      next_en: "Tell me one small thing about your day?",
+      vi_translation: "Kể mình nghe một điều nhỏ trong ngày của bạn nhé?",
       scaffold_chips: [],
       used_vietnamese: false,
       encouragement: "",
@@ -165,14 +213,45 @@ app.post("/api/chat", async (req, res) => {
     }
     const system = buildSystemPrompt({ sessionNumber: 1, confidenceLevel: "low", streakDays: 1 });
     const reply = await askToki({ system, messages });
-    res.json(reply); // includes spoken_reply, vi_translation, scaffold_chips, errors_noticed, used_vietnamese, encouragement
+    res.json(reply); // roast_vi, teach_en, next_en, vi_translation, scaffold_chips, errors_noticed, used_vietnamese, encouragement
   } catch (e) {
     console.error("chat error:", e.message);
     res.json({
-      spoken_reply: "Hmm, I didn't catch that — but no worries. Tell me one small thing about your day?",
-      vi_translation: "Hmm, mình chưa nghe rõ — không sao cả. Kể mình nghe một điều nhỏ trong ngày của bạn nhé?",
+      roast_vi: "Ơ, mạng lag hay sao á, nói lại giúp mình cái nào!",
+      teach_en: "",
+      next_en: "Tell me one small thing about your day?",
+      vi_translation: "Kể mình nghe một điều nhỏ trong ngày của bạn nhé?",
       scaffold_chips: [], errors_noticed: [], used_vietnamese: false, encouragement: "", degraded: true,
     });
+  }
+});
+
+// ---- POST /api/tts : optional high-quality voice via ElevenLabs ----
+// Returns MP3 audio. If ELEVENLABS_API_KEY is not set, responds 501 so the
+// frontend gracefully falls back to the browser's built-in speech voice.
+const ELEVEN_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVEN_VOICE = process.env.ELEVENLABS_VOICE_ID || "EXAVITQu4vr4xnSDxMaL"; // a warm default voice
+app.post("/api/tts", async (req, res) => {
+  try {
+    if (!ELEVEN_KEY) return res.status(501).json({ error: "tts not configured" });
+    const { text } = req.body || {};
+    if (!text) return res.status(400).json({ error: "text required" });
+    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE}`, {
+      method: "POST",
+      headers: { "xi-api-key": ELEVEN_KEY, "content-type": "application/json", accept: "audio/mpeg" },
+      body: JSON.stringify({
+        text,
+        model_id: "eleven_flash_v2_5", // low-latency, good for conversation
+        voice_settings: { stability: 0.4, similarity_boost: 0.75 },
+      }),
+    });
+    if (!r.ok) { console.error("tts error", r.status, await r.text()); return res.status(502).json({ error: "tts upstream" }); }
+    res.setHeader("Content-Type", "audio/mpeg");
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.send(buf);
+  } catch (e) {
+    console.error("tts error:", e.message);
+    res.status(500).json({ error: "tts failed" });
   }
 });
 
@@ -183,6 +262,30 @@ app.get("/api/review", (req, res) => {
     if (!userId) return res.status(400).json({ error: "userId required" });
     const list = db.getErrorsForUser(userId, 50);
     res.json({ items: list });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// ---- GET /api/vocab?userId=... : the saved-words notebook ----
+app.get("/api/vocab", (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: "userId required" });
+    res.json({ items: db.getVocabForUser(userId, 200) });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// ---- GET /api/progress?userId=... : journey stats ----
+app.get("/api/progress", (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: "userId required" });
+    const p = db.getProgress(userId);
+    if (!p) return res.status(404).json({ error: "unknown user" });
+    res.json(p);
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
   }
