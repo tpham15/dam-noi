@@ -1,0 +1,42 @@
+# ===== Dependencies (QUAN TRỌNG: phải bỏ node_modules, nếu không Render sẽ lỗi ELF) =====
+node_modules/
+**/node_modules/
+
+# ===== Build output =====
+dist/
+build/
+**/dist/
+
+# ===== Môi trường / bí mật (KHÔNG đẩy API key lên GitHub) =====
+.env
+.env.local
+.env.*.local
+**/.env
+
+# ===== Database cục bộ (SQLite) =====
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+backend/damnoi.db
+backend/damnoi.db-*
+
+# ===== Logs =====
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ===== Hệ điều hành / trình soạn thảo =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ===== Expo / React Native (mobile) =====
+.expo/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
