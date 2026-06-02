@@ -866,9 +866,9 @@ export default function App() {
           {screen === "welcome" && (
             <div className="welcome">
               <Toki size="lg" />
-              <h1 className="disp">Dám Nói</h1>
-              <p className="tag">nói tiếng Anh, không sợ sai</p>
-              <p className="promise disp">"Cứ nói đi.<br/>Đừng sợ sai."</p>
+              <h1 className="disp">MoHo AI</h1>
+              <p className="tag">Dare to speak</p>
+              <p className="promise disp">"Cứ nói đại.<br/>Đừng sợ sai."</p>
               <button className="cta" onClick={() => setScreen(getJob() ? "home" : "job")}>Bắt đầu</button>
               <p className="fine">Toki nói tiếng Anh · bí từ cứ chêm tiếng Việt</p>
             </div>
@@ -1135,7 +1135,7 @@ export default function App() {
                     <Toki size="sm" />
                     <div>
                       <div className="bragname">Sổ phốt tiếng Anh</div>
-                      <div className="bragsub">by Dám Nói 🔥</div>
+                      <div className="bragsub">by MoHo AI 🔥</div>
                     </div>
                   </div>
                   <div className="bragstats">
