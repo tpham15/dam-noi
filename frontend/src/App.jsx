@@ -458,6 +458,11 @@ const STYLE = `
 .finbtns .sec:hover{color:var(--green-d);border-color:var(--green);}
 
 .feed{flex:1;overflow-y:auto;padding:18px 16px 6px;display:flex;flex-direction:column;gap:13px;scroll-behavior:smooth;}
+.dn .feed::-webkit-scrollbar,.dn .grid::-webkit-scrollbar,.dn .sheet::-webkit-scrollbar{width:6px;}
+.dn .feed::-webkit-scrollbar-track,.dn .grid::-webkit-scrollbar-track,.dn .sheet::-webkit-scrollbar-track{background:transparent;}
+.dn .feed::-webkit-scrollbar-thumb,.dn .grid::-webkit-scrollbar-thumb,.dn .sheet::-webkit-scrollbar-thumb{background:#FF5E3A55;border-radius:10px;}
+.dn .feed::-webkit-scrollbar-thumb:hover,.dn .grid::-webkit-scrollbar-thumb:hover,.dn .sheet::-webkit-scrollbar-thumb:hover{background:#FF5E3A88;}
+.dn .feed,.dn .grid,.dn .sheet{scrollbar-width:thin;scrollbar-color:#FF5E3A55 transparent;}
 .row{display:flex;flex-direction:column;animation:rise .42s cubic-bezier(.2,.8,.2,1) both;max-width:84%;}
 .row.t{align-self:flex-start;align-items:flex-start;}
 .row.u{align-self:flex-end;align-items:flex-end;}
@@ -568,6 +573,8 @@ export default function App() {
   const [starters, setStarters] = useState([]);
   const [showStarters, setShowStarters] = useState(false);
   const [typing, setTyping] = useState(false); // silent-mode text input toggle
+  const typingRef = useRef(false);
+  useEffect(() => { typingRef.current = typing; }, [typing]);
   const sessionRef = useRef({ userId: null, sessionId: null });
   const lastSpokeRef = useRef(Date.now()); // to measure seconds spoken per turn
 
@@ -666,7 +673,9 @@ export default function App() {
     clearSilence();
     if (silenceRef.current.count >= 3) return;
     // Give people room to think. Longer on the first wait, a bit shorter after.
-    const waitMs = silenceRef.current.count === 0 ? 40000 : 30000;
+    // Typing takes longer than speaking, so wait generously — even more in typing mode.
+    const base = typingRef.current ? 90000 : 55000;
+    const waitMs = silenceRef.current.count === 0 ? base : Math.round(base * 0.75);
     silenceRef.current.timer = setTimeout(() => { silenceRef.current.count += 1; sendTurn(`[USER_SILENT count=${silenceRef.current.count}]`, { silent: true }); }, waitMs);
   }, []);
 
