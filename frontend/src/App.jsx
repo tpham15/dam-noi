@@ -236,7 +236,7 @@ const FUN_TOPICS = [
   { id: "partner", icon: "💑", vi: "Người yêu giận dỗi", en: "Couple's spat", desc: "Cãi yêu chuyện thường ngày", seed: "[TOPIC: A playful, comedic partner having a light-hearted lovers' spat — PG, funny, affectionate, never sexual or cruel]", hue: "#D17BA0",
     openers: [
       ["If I turned into a caterpillar in the future, would you still keep me as a pet? Or would you throw me away because you're scared of getting itchy?", "Cưng ơi, Nếu sau này me biến thành một con sâu róm, you có nuôi me tiếp không, hay cưng vứt me đi vì sợ ngứa?"],
-      ["If someone offered you 10 billion VND to break up with me for a month, and we'd get back together after that, would you do it? Why?", Nếu có người trả me 10 tỷ để you chia tay me trong vòng 1 tháng, xong tháng sau mình quay lại, you có chia tay me không, tại sao?"],
+      ["If someone offered you 10 billion VND to break up with me for a month, and we'd get back together after that, would you do it? Why?", "Nếu có người trả me 10 tỷ để you chia tay me trong vòng 1 tháng, xong tháng sau mình quay lại, you có chia tay me không, tại sao?"],
       ["You said five more minutes... an hour ago. We're so late! What happened?", "you bảo năm phút nữa... từ một tiếng trước. Trễ lắm rồi đó! Sao vậy?"],
       ["Hmm, you've been on your phone all dinner. Is something more interesting than me?", "Hừm, cả bữa tối you cứ dán mắt vào điện thoại. Có gì thú vị hơn me à?"],
     ],
