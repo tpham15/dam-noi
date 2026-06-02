@@ -221,12 +221,12 @@ const FUN_TOPICS = [
     ] },
   { id: "silly", icon: "🤪", vi: "Nói chuyện vô tri", en: "Silly talk", desc: "Tám chuyện trời ơi đất hỡi", seed: "[TOPIC: Absurd, silly, meme-y nonsense chat — keep it light, funny, zero stakes]", hue: "#C98A3A",
     openers: [
-      ["Important question: In the song \'Chị ong nâu và em bé'\, where is the \'chị ong'\ flying to?", "Câu hỏi quan trọng nè: Trong bài hát \'Chị ong nâu và em bé'\, Chị ong bay đi đâu?"],
+      ["Important question: In the song Chị ong nâu và em bé, where is the chị ong flying to?", "Câu hỏi quan trọng nè: Trong bài hát Chị ong nâu và em bé, Chị ong bay đi đâu?"],
       ["Okay random question: If a mosquito gets bitten by another mosquito, does it itch?", "Câu hỏi ngẫu hứng nè: Nếu một con muỗi đốt một con muỗi khác, thì con muỗi bị đốt có bị ngứa không?"],
       ["Burning question: If I work to buy food to survive to work... am I working to eat or eating to work?", "Nếu mình đi làm để kiếm tiền mua đồ ăn lấy sức đi làm... vậy mục đích cuối cùng của mình là đi làm hay là để ăn?"],
       ["Quick! You just won a lottery. What would you do?", "Nhanh nào! Bạn vừa trúng số. Bạn tính làm gì?"],
     ],
-    opener: "Important question: In the song \'Chị ong nâu và em bé'\, where is the \'chị ong'\ flying to?",
+    opener: "Important question: In the song Chị ong nâu và em bé, where is the chị ong flying to?",
     openerVi: "Câu hỏi quan trọng nè: Trong bài hát "Chị ong nâu và em bé", Chị ong bay đi đâu?",
     starters: [
       { vi: "Câu hỏi vô tri", scene: "ask the user a silly hypothetical question and riff on their answer" },
