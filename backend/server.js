@@ -227,26 +227,49 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// ---- POST /api/tts : optional high-quality voice via ElevenLabs ----
-// Returns MP3 audio. If ELEVENLABS_API_KEY is not set, responds 501 so the
+// ---- POST /api/tts : high-quality voice via Azure Speech (Neural) ----
+// Returns MP3 audio. If AZURE_SPEECH_KEY/REGION are not set, responds 501 so the
 // frontend gracefully falls back to the browser's built-in speech voice.
-const ELEVEN_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVEN_VOICE = process.env.ELEVENLABS_VOICE_ID || "EXAVITQu4vr4xnSDxMaL"; // a warm default voice
+const AZURE_KEY = process.env.AZURE_SPEECH_KEY;
+const AZURE_REGION = process.env.AZURE_SPEECH_REGION || "southeastasia";
+const AZURE_VOICE = process.env.AZURE_SPEECH_VOICE || "en-US-SaraNeural";
+
+// Escape text so it's safe inside SSML/XML.
+function xmlEscape(s) {
+  return String(s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+
 app.post("/api/tts", async (req, res) => {
   try {
-    if (!ELEVEN_KEY) return res.status(501).json({ error: "tts not configured" });
+    if (!AZURE_KEY) return res.status(501).json({ error: "tts not configured" });
     const { text } = req.body || {};
     if (!text) return res.status(400).json({ error: "text required" });
-    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE}`, {
-      method: "POST",
-      headers: { "xi-api-key": ELEVEN_KEY, "content-type": "application/json", accept: "audio/mpeg" },
-      body: JSON.stringify({
-        text,
-        model_id: "eleven_flash_v2_5", // low-latency, good for conversation
-        voice_settings: { stability: 0.4, similarity_boost: 0.75 },
-      }),
-    });
-    if (!r.ok) { console.error("tts error", r.status, await r.text()); return res.status(502).json({ error: "tts upstream" }); }
+
+    // Build SSML. Lang must match the voice. Slight style for a friendlier tone.
+    const ssml =
+      `<speak version='1.0' xml:lang='en-US'>` +
+      `<voice xml:lang='en-US' name='${AZURE_VOICE}'>${xmlEscape(text)}</voice>` +
+      `</speak>`;
+
+    const r = await fetch(
+      `https://${AZURE_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`,
+      {
+        method: "POST",
+        headers: {
+          "Ocp-Apim-Subscription-Key": AZURE_KEY,
+          "Content-Type": "application/ssml+xml",
+          "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+          "User-Agent": "DamNoi",
+        },
+        body: ssml,
+      }
+    );
+    if (!r.ok) {
+      console.error("azure tts error", r.status, await r.text());
+      return res.status(502).json({ error: "tts upstream" });
+    }
     res.setHeader("Content-Type", "audio/mpeg");
     const buf = Buffer.from(await r.arrayBuffer());
     res.send(buf);

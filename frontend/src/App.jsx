@@ -647,17 +647,39 @@ export default function App() {
     speakBrowser(text);
   }, [speakBrowser]);
   // Speak ONLY English. The Vietnamese correction is shown as text, never spoken.
-  const speakEn = useCallback((enText) => {
-    if (!ttsRef.current || !enText || typeof window === "undefined" || !window.speechSynthesis) return;
+  const speakBrowserEn = useCallback((enText) => {
+    if (typeof window === "undefined" || !window.speechSynthesis || !enText) return;
     try {
       window.speechSynthesis.cancel();
-      if (audioRef.current) { try { audioRef.current.pause(); } catch {} }
       const u = new SpeechSynthesisUtterance(enText);
       u.lang = "en-US"; u.rate = slowRef.current ? 0.78 : 0.94; u.pitch = 1.0;
       const v = chosenVoiceRef.current || pickVoice(); if (v) { u.voice = v; u.lang = v.lang; }
       window.speechSynthesis.speak(u);
     } catch {}
   }, []);
+  const speakEn = useCallback(async (enText) => {
+    if (!ttsRef.current || !enText) return;
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    if (audioRef.current) { try { audioRef.current.pause(); } catch {} }
+    // Try the high-quality Azure voice from the backend first.
+    if (!ttsFailedRef.current) {
+      try {
+        const r = await fetch(`${API}/api/tts`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: enText }) });
+        if (r.ok) {
+          const blob = await r.blob();
+          const url = URL.createObjectURL(blob);
+          const a = new Audio(url);
+          a.playbackRate = slowRef.current ? 0.85 : 1;
+          audioRef.current = a;
+          a.onended = () => URL.revokeObjectURL(url);
+          await a.play();
+          return;
+        }
+        ttsFailedRef.current = true; // 501/502 -> stop retrying, use browser voice
+      } catch { ttsFailedRef.current = true; }
+    }
+    speakBrowserEn(enText); // fallback
+  }, [speakBrowserEn]);
   const speakSeq = useCallback((_viText, enText) => speakEn(enText), [speakEn]);
 
   useEffect(() => { if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight; }, [ui, chips, loading]);
