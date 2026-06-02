@@ -582,14 +582,27 @@ export default function App() {
   useEffect(() => { if (!sttSupported) setTyping(true); }, [sttSupported]);
 
   const pickVoice = () => {
-    const vs = window.speechSynthesis.getVoices().filter((x) => /^en[-_]/i.test(x.lang));
+    const all = window.speechSynthesis.getVoices();
+    const vs = all.filter((x) => /^en[-_]/i.test(x.lang));
     if (!vs.length) return null;
-    // Prefer known natural-sounding voices, then any local en voice, then any en voice.
-    const prefer = ["Samantha", "Google US English", "Microsoft Aria", "Microsoft Jenny", "Karen", "Moira", "Google UK English Female"];
-    for (const name of prefer) { const m = vs.find((v) => v.name.includes(name)); if (m) return m; }
-    return vs.find((v) => v.localService) || vs[0];
+    const score = (v) => {
+      const n = (v.name || "").toLowerCase();
+      let s = 0;
+      // Highest quality keywords across platforms (Apple/Google/MS neural voices).
+      if (/(neural|natural|enhanced|premium|siri)/.test(n)) s += 100;
+      if (/google/.test(n)) s += 60;          // Google voices on Chrome sound good
+      if (/microsoft/.test(n) && /(aria|jenny|guy|natural)/.test(n)) s += 55;
+      // Known decent named voices.
+      if (/(samantha|karen|moira|tessa|serena|allison|ava|zoe|nathan)/.test(n)) s += 30;
+      if (/^en-us/i.test(v.lang)) s += 8;      // prefer US accent slightly
+      if (v.localService) s += 5;              // local = no network lag
+      if (/(compact|eloquence|fred|albert|zarvox|novelty)/.test(n)) s -= 80; // robotic ones
+      return s;
+    };
+    return vs.slice().sort((a, b) => score(b) - score(a))[0] || vs[0];
   };
   const audioRef = useRef(null);
+  const chosenVoiceRef = useRef(null);
   const ttsFailedRef = useRef(false); // once backend TTS is known-unavailable, skip it
   const speakBrowser = useCallback((text) => {
     if (typeof window === "undefined" || !window.speechSynthesis) return;
@@ -597,7 +610,7 @@ export default function App() {
       window.speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
       u.lang = "en-US"; u.rate = slowRef.current ? 0.78 : 0.94; u.pitch = 1.0;
-      const v = pickVoice();
+      const v = chosenVoiceRef.current || pickVoice();
       if (v) { u.voice = v; u.lang = v.lang; }
       window.speechSynthesis.speak(u);
     } catch {}
@@ -632,7 +645,7 @@ export default function App() {
       if (audioRef.current) { try { audioRef.current.pause(); } catch {} }
       const u = new SpeechSynthesisUtterance(enText);
       u.lang = "en-US"; u.rate = slowRef.current ? 0.78 : 0.94; u.pitch = 1.0;
-      const v = pickVoice(); if (v) { u.voice = v; u.lang = v.lang; }
+      const v = chosenVoiceRef.current || pickVoice(); if (v) { u.voice = v; u.lang = v.lang; }
       window.speechSynthesis.speak(u);
     } catch {}
   }, []);
@@ -641,9 +654,10 @@ export default function App() {
   useEffect(() => { if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight; }, [ui, chips, loading]);
   useEffect(() => {
     if (typeof window === "undefined" || !window.speechSynthesis) return;
-    const warm = () => window.speechSynthesis.getVoices();
+    const warm = () => { try { window.speechSynthesis.getVoices(); chosenVoiceRef.current = pickVoice(); } catch {} };
     warm();
-    window.speechSynthesis.onvoiceschanged = warm;
+    window.speechSynthesis.addEventListener?.("voiceschanged", warm);
+    return () => window.speechSynthesis.removeEventListener?.("voiceschanged", warm);
   }, []);
   useEffect(() => { if (screen !== "chat") return; const id = setInterval(() => setElapsed((e) => e + 1), 1000); return () => clearInterval(id); }, [screen]);
 
@@ -843,8 +857,8 @@ export default function App() {
             <div className="welcome">
               <Toki size="lg" />
               <h1 className="disp">Dám Nói</h1>
-              <p className="tag">Dare to speak</p>
-              <p className="promise disp">"Cứ nói đại.<br/>Đừng sợ sai."</p>
+              <p className="tag">nói tiếng Anh, không sợ sai</p>
+              <p className="promise disp">"Cứ nói đi.<br/>Đừng sợ sai."</p>
               <button className="cta" onClick={() => setScreen(getJob() ? "home" : "job")}>Bắt đầu</button>
               <p className="fine">Toki nói tiếng Anh · bí từ cứ chêm tiếng Việt</p>
             </div>
