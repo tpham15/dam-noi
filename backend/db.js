@@ -178,6 +178,13 @@ function getWeaknesses(userId) {
   catch { return []; }
 }
 
+// Count how many errors the user has made in a given session (for escalating sass).
+const sessionErrCount = db.prepare("SELECT COUNT(*) AS n FROM errors WHERE session_id = ?");
+function getSessionErrorCount(sessionId) {
+  try { return sessionErrCount.get(sessionId).n || 0; }
+  catch { return 0; }
+}
+
 // --- Progress stats for the journey screen ---
 function getProgress(userId) {
   const u = getUser.get(userId);
@@ -200,6 +207,6 @@ module.exports = {
   getErrorsForUser: (userId, limit = 50) => getErrors.all(userId, limit),
   bumpSpoken,
   saveVocab, getVocabForUser: (userId, limit = 200) => getVocab.all(userId, limit),
-  getWeaknesses, getProgress,
+  getWeaknesses, getProgress, getSessionErrorCount,
   setJob: (userId, job) => db.prepare("UPDATE users SET job = ? WHERE id = ?").run(String(job || "").slice(0, 40), userId),
 };

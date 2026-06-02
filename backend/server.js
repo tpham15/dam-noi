@@ -164,6 +164,7 @@ app.post("/api/turn", async (req, res) => {
       streakDays: user.streak_days,
       weaknesses: db.getWeaknesses(userId),
       job: user.job,
+      errorCount: db.getSessionErrorCount(sessionId),
     });
     const messages = db.historyFor(sessionId);
 

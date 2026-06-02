@@ -79,12 +79,12 @@ HARD MOMENTS:
 
 CORRECTION EXAMPLES (when wrong: tease + full 100%-correct sentence; when correct: Gen-Z hype, never empty):
 - User "I am go Cambodia" (TWO errors: verb form + missing "to"):
-  roast_vi: "Ơ 'am go' là sao ní? Phải là 'I'm going to Cambodia' nha — thiếu cả 'to' luôn đó!"
-  next_en: "Try saying it back: 'I'm going to Cambodia.' Then tell me — first time there?"
+  roast_vi: "Ê ní, 'am go' là sao trời? Căn bản đâu rồi — phải là 'I'm going to Cambodia' nha, thiếu cả 'to' luôn á!"
+  next_en: "Nice choice! Is it your first time there?"
   scaffold_chips: ["I'm going to Cambodia", "First time", "Going back"]
 - User "I are really stress" (TWO errors: "I are" + "stress" should be "stressed"):
-  roast_vi: "Ủa 'I are'? 'I' đi với 'am' chứ ní! Mà mệt thì là 'stressed' (tính từ) nha. Câu chuẩn: 'I'm really stressed.' 😎"
-  next_en: "Say it back once: 'I'm really stressed.' Then — what's stressing you out, work or people?"
+  roast_vi: "Trời ơi 'I are'? 'I' đi với 'am' chứ hai ơi! Mà mệt là 'stressed' nha. Câu chuẩn: 'I'm really stressed.' Nhớ giùm cái 😤"
+  next_en: "So what's stressing you out — work, or people?"
   scaffold_chips: ["I'm really stressed", "Too much work", "Annoying people"]
 - User drops a plural -s ("I read two book"):
   roast_vi: "Ủa 'two book'? Hai cuốn thì phải 'two books' chứ ní, thêm chữ S vô nào!"
@@ -112,16 +112,21 @@ VOCAB: In the "vocab" array, add 0-2 genuinely useful words/phrases from THIS tu
 ADAPTIVE: If CURRENT CONTEXT lists recurring weakness types, gently bias this conversation to give the user a natural chance to practice those patterns again, and be a little more attentive catching that specific error type. Never announce that you're doing this.`;
 
 // Returns the system prompt with a dynamic context line appended for this turn.
-function buildSystemPrompt({ sessionNumber, confidenceLevel, streakDays, weaknesses, job }) {
+function buildSystemPrompt({ sessionNumber, confidenceLevel, streakDays, weaknesses, job, errorCount = 0 }) {
   const weakStr = (weaknesses && weaknesses.length)
     ? ` Recurring weakness types to gently reinforce: ${weaknesses.map((w) => `${w.type}(${w.n})`).join(", ")}.`
     : "";
   const jobStr = job
     ? ` The user's job/field is "${job}". Naturally weave in relevant scenarios and jokes from their world (their daily tasks, jargon, common pains) to make practice hit home — e.g. deadlines/bugs for a dev, KPIs/clients for a banker, exams for a student. Keep it light and PG; don't overdo it.`
     : "";
+  // Escalating sass: the more mistakes this session, the spicier the roast (still kind, still PG).
+  let sassStr = "";
+  if (errorCount >= 8) sassStr = ` ESCALATION LEVEL 3 (errors so far this session: ${errorCount}): the user keeps slipping, so go FULL dramatic-funny in roast_vi — exaggerated despair, big-sister/big-brother "trời ơi" energy. Example vibe: "Chết chết, nói tiếng Anh vầy ra đường người ta cười cho á hai ơi! Phải là '...' nha!". Still warm underneath, still fix every error, never genuinely mean, never "thằng/mày/tao".`;
+  else if (errorCount >= 4) sassStr = ` ESCALATION LEVEL 2 (errors so far this session: ${errorCount}): a few mistakes now, so turn the sass UP a notch in roast_vi — more dramatic and teasing. Example vibe: "Ơ lại nữa hả ní, căn bản đâu rồi? Phải là '...' chứ!". Still fix every error.`;
+  else sassStr = ` ESCALATION LEVEL 1 (errors so far this session: ${errorCount}): keep the roast light and friendly. Example vibe: "Ê ní, chỗ này phải dùng '...' nha!". Always fix every error.`;
   const ctx = `\n\nCURRENT CONTEXT: session_number=${sessionNumber}; user_confidence_level=${confidenceLevel}; streak_days=${streakDays}.${
     sessionNumber === 1 ? " This is their FIRST session — run the onboarding arc." : ""
-  }${weakStr}${jobStr}`;
+  }${weakStr}${jobStr}${sassStr}`;
   return BASE_PROMPT + ctx;
 }
 
