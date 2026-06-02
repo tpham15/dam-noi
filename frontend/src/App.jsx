@@ -458,11 +458,11 @@ const STYLE = `
 .finbtns .sec:hover{color:var(--green-d);border-color:var(--green);}
 
 .feed{flex:1;overflow-y:auto;padding:18px 16px 6px;display:flex;flex-direction:column;gap:13px;scroll-behavior:smooth;}
-.dn .feed::-webkit-scrollbar,.dn .grid::-webkit-scrollbar,.dn .sheet::-webkit-scrollbar{width:6px;}
-.dn .feed::-webkit-scrollbar-track,.dn .grid::-webkit-scrollbar-track,.dn .sheet::-webkit-scrollbar-track{background:transparent;}
-.dn .feed::-webkit-scrollbar-thumb,.dn .grid::-webkit-scrollbar-thumb,.dn .sheet::-webkit-scrollbar-thumb{background:#FF5E3A55;border-radius:10px;}
-.dn .feed::-webkit-scrollbar-thumb:hover,.dn .grid::-webkit-scrollbar-thumb:hover,.dn .sheet::-webkit-scrollbar-thumb:hover{background:#FF5E3A88;}
-.dn .feed,.dn .grid,.dn .sheet{scrollbar-width:thin;scrollbar-color:#FF5E3A55 transparent;}
+.dn *::-webkit-scrollbar{width:6px;height:6px;}
+.dn *::-webkit-scrollbar-track{background:transparent;}
+.dn *::-webkit-scrollbar-thumb{background:#FF5E3A55;border-radius:10px;}
+.dn *::-webkit-scrollbar-thumb:hover{background:#FF5E3A99;}
+.dn *{scrollbar-width:thin;scrollbar-color:#FF5E3A55 transparent;}
 .row{display:flex;flex-direction:column;animation:rise .42s cubic-bezier(.2,.8,.2,1) both;max-width:84%;}
 .row.t{align-self:flex-start;align-items:flex-start;}
 .row.u{align-self:flex-end;align-items:flex-end;}
@@ -470,7 +470,9 @@ const STYLE = `
 .bub{padding:12px 16px;border-radius:21px;font-size:15.5px;line-height:1.5;font-weight:600;}
 .bub.t{background:var(--card);border:1px solid var(--line);border-bottom-left-radius:7px;}
 .bub.u{background:var(--user);color:#fff;border-bottom-right-radius:7px;}
-.bub .roast{color:var(--coral);font-weight:800;font-style:italic;line-height:1.45;}
+.bub .roast{font-weight:800;font-style:italic;line-height:1.45;}
+.bub .roast.fix{color:var(--coral);}
+.bub .roast.hype{color:var(--sun);}
 .bub .enline{margin-top:6px;}
 .mtools{display:flex;gap:5px;margin-top:6px;padding-left:3px;}
 .mtb{display:flex;align-items:center;gap:5px;font-size:11.5px;font-weight:800;color:var(--muted);background:var(--card);border:1px solid var(--line);padding:5px 10px;border-radius:30px;cursor:pointer;transition:.14s;}
@@ -703,12 +705,11 @@ export default function App() {
       });
       const stripQ = (s) => String(s || "").trim().replace(/^["'“”]+|["'“”]+$/g, "").trim();
       const en = stripQ(r.next_en);
-      // The roast (Vietnamese correction) only shows when there's a real error.
-      // But the translation (vi) of Toki's English line should ALWAYS be available,
-      // so the "Dịch" button stays whether or not the user made a mistake.
-      const hasErr = Number(r.errorsThisTurn || 0) > 0 && String(r.roast_vi || "").trim() !== "";
-      const roast = hasErr ? stripQ(r.roast_vi) : "";
-      setUi((p) => [...p, { who: "t", roast, en, vi: stripQ(r.vi_translation), enc: r.encouragement }]);
+      // roast_vi is ALWAYS shown now: a Gen-Z hype line when correct, a tease+fix
+      // when there's an error. isFix flags a real correction (for stronger styling).
+      const isFix = Number(r.errorsThisTurn || 0) > 0;
+      const roast = stripQ(r.roast_vi);
+      setUi((p) => [...p, { who: "t", roast, isFix, en, vi: stripQ(r.vi_translation), enc: r.encouragement }]);
       setChips(r.scaffold_chips || []);
       if (typeof r.streakDays === "number") setStreak(r.streakDays);
       if (r.errorsThisTurn) setErrorCount((c) => c + r.errorsThisTurn);
@@ -969,7 +970,7 @@ export default function App() {
                     ) : (
                       <div className="row t">
                         <div className="bub t">
-                          {m.roast && <div className="roast">{m.roast}</div>}
+                          {m.roast && <div className={`roast ${m.isFix ? "fix" : "hype"}`}>{m.roast}</div>}
                           {(m.en || m.text) && <div className={m.roast ? "enline" : undefined}>{m.en || m.text}</div>}
                         </div>
                         <div className="mtools">
