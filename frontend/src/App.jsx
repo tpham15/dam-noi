@@ -227,7 +227,7 @@ const FUN_TOPICS = [
       ["Quick! You just won a lottery. What would you do?", "Nhanh nào! Bạn vừa trúng số. Bạn tính làm gì?"],
     ],
     opener: "Important question: In the song Chị ong nâu và em bé, where is the chị ong flying to?",
-    openerVi: "Câu hỏi quan trọng nè: Trong bài hát "Chị ong nâu và em bé", Chị ong bay đi đâu?",
+    openerVi: "Câu hỏi quan trọng nè: Trong bài hát Chị ong nâu và em bé", Chị ong bay đi đâu?",
     starters: [
       { vi: "Câu hỏi vô tri", scene: "ask the user a silly hypothetical question and riff on their answer" },
       { vi: "Nếu mèo biết nói", scene: "imagine together what cats would say if they could talk" },
