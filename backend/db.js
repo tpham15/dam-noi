@@ -214,9 +214,15 @@ async function getProgress(userId) {
   if (!u) return null;
   const e = await pool.query("SELECT COUNT(*)::int AS n FROM errors WHERE user_id = $1", [userId]);
   const v = await pool.query("SELECT COUNT(*)::int AS n FROM vocab WHERE user_id = $1", [userId]);
+  // "Buổi đã nói" should mean sessions where the user actually spoke at least
+  // one real turn — not just sessions that were opened. Count those.
+  const s = await pool.query(
+    "SELECT COUNT(*)::int AS n FROM sessions WHERE user_id = $1 AND words_spoken > 0",
+    [userId]
+  );
   return {
     streakDays: u.streak_days,
-    totalSessions: u.total_sessions,
+    totalSessions: s.rows[0].n,
     totalSeconds: u.total_seconds,
     totalWords: u.total_words,
     correctionsLearned: e.rows[0].n,
