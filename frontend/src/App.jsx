@@ -711,24 +711,48 @@ export default function App() {
         return;
       } catch {}
     }
-    // Try the high-quality Azure voice from the backend first.
+    // Fetch from Azure (via backend). Returns true on success.
+    const tryAzure = async () => {
+      const r = await fetch(`${API}/api/tts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: enText }),
+      });
+      if (r.ok) {
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        ttsCacheRef.current.set(enText, url); // keep for replays
+        const a = new Audio(url);
+        a.playbackRate = slowRef.current ? 0.85 : 1;
+        audioRef.current = a;
+        await a.play();
+        return true;
+      }
+      // 501 = backend has no Azure key configured -> give up permanently.
+      if (r.status === 501) ttsFailedRef.current = true;
+      return false;
+    };
+
+    // Only skip Azure entirely if we've confirmed it's unconfigured (501).
     if (!ttsFailedRef.current) {
       try {
-        const r = await fetch(`${API}/api/tts`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: enText }) });
-        if (r.ok) {
-          const blob = await r.blob();
-          const url = URL.createObjectURL(blob);
-          ttsCacheRef.current.set(enText, url); // keep for replays
-          const a = new Audio(url);
-          a.playbackRate = slowRef.current ? 0.85 : 1;
-          audioRef.current = a;
-          await a.play();
-          return;
+        if (await tryAzure()) return;
+        // A non-501 failure (e.g. backend still waking up, or quota blip): wait a
+        // beat and try ONCE more before falling back, instead of giving up.
+        if (!ttsFailedRef.current) {
+          await new Promise((res) => setTimeout(res, 1200));
+          if (await tryAzure()) return;
         }
-        ttsFailedRef.current = true; // 501/502 -> stop retrying, use browser voice
-      } catch { ttsFailedRef.current = true; }
+      } catch {
+        // Network/transient error: wait and retry once; do NOT disable Azure for
+        // the whole session just because the server was waking up.
+        try {
+          await new Promise((res) => setTimeout(res, 1200));
+          if (await tryAzure()) return;
+        } catch {}
+      }
     }
-    speakBrowserEn(enText); // fallback
+    speakBrowserEn(enText); // fallback only after retries
   }, [speakBrowserEn]);
   const speakSeq = useCallback((_viText, enText) => speakEn(enText), [speakEn]);
 
@@ -739,6 +763,11 @@ export default function App() {
     warm();
     window.speechSynthesis.addEventListener?.("voiceschanged", warm);
     return () => window.speechSynthesis.removeEventListener?.("voiceschanged", warm);
+  }, []);
+  // Wake the backend as soon as the app opens, so it's up by the time the user
+  // reaches the chat and needs the Azure voice (Render free sleeps when idle).
+  useEffect(() => {
+    fetch(`${API}/api/health`).catch(() => {});
   }, []);
   useEffect(() => { if (screen !== "chat") return; const id = setInterval(() => setElapsed((e) => e + 1), 1000); return () => clearInterval(id); }, [screen]);
 
@@ -848,7 +877,7 @@ export default function App() {
       // fail gracefully into the fallback line. Surface a gentle hint.
       setMicError("Chưa kết nối được máy chủ. Kiểm tra server backend có đang chạy không.");
     } finally { setStarting(false); }
-    setTimeout(() => speak(opener), 380); armSilence();
+    setTimeout(() => speakEn(opener), 380); armSilence();
   };
 
   const openReview = async () => {

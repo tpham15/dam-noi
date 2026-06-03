@@ -10,6 +10,10 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
+// Lightweight wake/health check — no DB, no AI. Used to warm the server up
+// (e.g. an external ping to keep Render awake, and the app pinging on load).
+app.get("/api/health", (_req, res) => res.json({ ok: true }));
+
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 const MODEL = process.env.TOKI_MODEL || "claude-haiku-4-5-20251001";
 if (!API_KEY) console.warn("WARNING: ANTHROPIC_API_KEY is not set.");
@@ -293,13 +297,39 @@ function xmlEscape(s) {
     .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
 
+// Simple in-memory cache: voice+text -> mp3 Buffer. Shared across all users, so
+// repeated lines (openers, common replies) are spoken by Azure only once.
+// Capped so memory can't grow unbounded; oldest entries drop first.
+const TTS_CACHE = new Map();
+const TTS_CACHE_MAX = 500;
+function ttsCacheGet(key) {
+  const v = TTS_CACHE.get(key);
+  if (v) { TTS_CACHE.delete(key); TTS_CACHE.set(key, v); } // mark as recently used
+  return v;
+}
+function ttsCacheSet(key, buf) {
+  TTS_CACHE.set(key, buf);
+  if (TTS_CACHE.size > TTS_CACHE_MAX) {
+    const oldest = TTS_CACHE.keys().next().value;
+    TTS_CACHE.delete(oldest);
+  }
+}
+
 app.post("/api/tts", async (req, res) => {
   try {
     if (!AZURE_KEY) return res.status(501).json({ error: "tts not configured" });
     const { text } = req.body || {};
     if (!text) return res.status(400).json({ error: "text required" });
 
-    // Build SSML. Lang must match the voice. Slight style for a friendlier tone.
+    const cacheKey = `${AZURE_VOICE}:${text}`;
+    const cached = ttsCacheGet(cacheKey);
+    if (cached) {
+      res.setHeader("Content-Type", "audio/mpeg");
+      res.setHeader("X-Cache", "HIT");
+      return res.send(cached);
+    }
+
+    // Build SSML. Lang must match the voice.
     const ssml =
       `<speak version='1.0' xml:lang='en-US'>` +
       `<voice xml:lang='en-US' name='${AZURE_VOICE}'>${xmlEscape(text)}</voice>` +
@@ -313,7 +343,7 @@ app.post("/api/tts", async (req, res) => {
           "Ocp-Apim-Subscription-Key": AZURE_KEY,
           "Content-Type": "application/ssml+xml",
           "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
-          "User-Agent": "DamNoi",
+          "User-Agent": "MoHo",
         },
         body: ssml,
       }
@@ -322,8 +352,10 @@ app.post("/api/tts", async (req, res) => {
       console.error("azure tts error", r.status, await r.text());
       return res.status(502).json({ error: "tts upstream" });
     }
-    res.setHeader("Content-Type", "audio/mpeg");
     const buf = Buffer.from(await r.arrayBuffer());
+    ttsCacheSet(cacheKey, buf);
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("X-Cache", "MISS");
     res.send(buf);
   } catch (e) {
     console.error("tts error:", e.message);
