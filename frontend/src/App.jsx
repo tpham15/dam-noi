@@ -96,7 +96,7 @@ const TOPICS = [
       { vi: "Điểm mạnh của tôi", scene: "the interviewer asks about the user's strengths" },
       { vi: "Vì sao ứng tuyển", scene: "the interviewer asks why the user wants this job" },
     ] },
-  { id: "coworker", icon: "🌐", vi: "Đồng nghiệp ngoại quốc", en: "Foreign coworker", desc: "Tám với đồng nghiệp nước ngoài", seed: "[TOPIC: Chatting with a friendly foreign coworker at the office — casual work small talk, NOT an interview. You play a relaxed international colleague.]", hue: "#4C84C4",
+  { id: "coworker", icon: "🌐", vi: "Đồng nghiệp Tây", en: "Foreign coworker", desc: "Tám với đồng nghiệp nước ngoài", seed: "[TOPIC: Chatting with a friendly foreign coworker at the office — casual work small talk, NOT an interview. You play a relaxed international colleague.]", hue: "#4C84C4",
     openers: [
       ["Hey! Grabbing a coffee — want one? How's your morning going?", "Chào bạn! Mình đi lấy cà phê nè — làm một ly không? Sáng nay sao rồi?"],
       ["Morning! Did you catch the game last night? Or are you a work-first kind of person?", "Chào buổi sáng! Tối qua có xem trận đấu không? Hay bạn kiểu việc-trước-đã?"],
@@ -394,6 +394,18 @@ async function apiVocab(userId) {
   return Array.isArray(r.items) ? r.items : [];
 }
 
+// Send recorded audio (base64) to the backend Azure STT. Returns the raw transcript.
+async function apiSTT(base64, contentType) {
+  const res = await fetch(`${API}/api/stt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ audio: base64, contentType }),
+  });
+  if (!res.ok) throw new Error("stt");
+  const r = await res.json();
+  return (r.text || "").trim();
+}
+
 async function apiProgress(userId) {
   const res = await fetch(`${API}/api/progress?userId=${encodeURIComponent(userId)}`);
   if (!res.ok) return null;
@@ -642,6 +654,12 @@ export default function App() {
   const [typing, setTyping] = useState(false); // silent-mode text input toggle
   const [limitHit, setLimitHit] = useState(false); // daily free cap reached
   const [account, setAccountState] = useState(() => getAccount()); // {email,name} when logged in
+  const [recording, setRecording] = useState(false); // server-STT recording in progress
+  const [sttBusy, setSttBusy] = useState(false);      // waiting for transcript
+  const mediaRecRef = useRef(null);
+  const chunksRef = useRef([]);
+  const streamRef = useRef(null);
+  const recordStartRef = useRef(0);
   const typingRef = useRef(false);
   useEffect(() => { typingRef.current = typing; }, [typing]);
   const sessionRef = useRef({ userId: null, sessionId: null });
@@ -1017,6 +1035,61 @@ export default function App() {
     }, 250);
   };
 
+  // --- Server-STT mode: record real audio, send to Azure STT for the RAW transcript ---
+  const startRecord = async () => {
+    if (loading || recording || sttBusy) return;
+    setMicError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      // Pick a mime type the browser supports; backend tells Azure the content type.
+      const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : (MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "");
+      const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      chunksRef.current = [];
+      rec.ondataavailable = (e) => { if (e.data && e.data.size) chunksRef.current.push(e.data); };
+      rec.onstop = async () => {
+        try { streamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
+        const blob = new Blob(chunksRef.current, { type: rec.mimeType || "audio/webm" });
+        chunksRef.current = [];
+        if (!blob.size) { setSttBusy(false); return; }
+        setSttBusy(true);
+        try {
+          const base64 = await new Promise((resolve, reject) => {
+            const fr = new FileReader();
+            fr.onload = () => resolve(String(fr.result).split(",")[1]);
+            fr.onerror = reject;
+            fr.readAsDataURL(blob);
+          });
+          const t0 = recordStartRef.current;
+          const text = await apiSTT(base64, rec.mimeType || "audio/webm");
+          // Log latency to console so we can measure (one of the 3 things to track).
+          console.log(`[STT] latency ${Date.now() - t0}ms, text:`, text);
+          if (text) handleSend(text);
+          else setMicError("Chưa nghe rõ — thử nói lại gần mic hơn nha.");
+        } catch {
+          setMicError("Nhận giọng lỗi — thử lại, hoặc gõ chữ bên dưới.");
+        } finally {
+          setSttBusy(false);
+        }
+      };
+      mediaRecRef.current = rec;
+      recordStartRef.current = Date.now();
+      rec.start();
+      setRecording(true);
+    } catch {
+      setMicError("Không truy cập được micro. Cho phép quyền mic, hoặc gõ chữ bên dưới.");
+    }
+  };
+
+  const stopRecord = () => {
+    if (!recording) return;
+    setRecording(false);
+    recordStartRef.current = Date.now(); // start latency clock at release
+    try { mediaRecRef.current?.stop(); } catch {}
+  };
+
   const mmss = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
   const roastTopic = FUN_TOPICS.find((t) => t.id === "roast");
   const funTopicsNoRoast = FUN_TOPICS.filter((t) => t.id !== "roast");
@@ -1181,21 +1254,21 @@ export default function App() {
                         <Keyboard size={20} />
                       </button>
                       <button
-                        className={`bigmic ${listening ? "on" : ""}`}
-                        disabled={!sttSupported || loading}
-                        title={sttSupported ? "Ấn giữ để phản xạ" : "Trình duyệt không hỗ trợ mic — bấm phím gõ chữ"}
-                        onMouseDown={startHold}
-                        onMouseUp={endHold}
-                        onMouseLeave={() => { if (holdingRef.current) endHold(); }}
-                        onTouchStart={(e) => { e.preventDefault(); startHold(); }}
-                        onTouchEnd={(e) => { e.preventDefault(); endHold(); }}
+                        className={`bigmic ${recording ? "on" : ""}`}
+                        disabled={loading || sttBusy}
+                        title="Ấn giữ để nói (nhận giọng qua server)"
+                        onMouseDown={startRecord}
+                        onMouseUp={stopRecord}
+                        onMouseLeave={() => { if (recording) stopRecord(); }}
+                        onTouchStart={(e) => { e.preventDefault(); startRecord(); }}
+                        onTouchEnd={(e) => { e.preventDefault(); stopRecord(); }}
                         onContextMenu={(e) => e.preventDefault()}
                       >
                         <Mic size={30} />
                       </button>
                       <div className="kbspacer" />
                     </div>
-                    <div className="mhint" style={micError ? { color: "var(--coral)" } : undefined}>{micError ? micError : listening ? "Đang nghe… cứ nói thoải mái" : sttSupported ? "Ấn giữ để phản xạ — hoặc bấm ⌨ để gõ" : "Bấm phím ⌨ để gõ câu của bạn"}</div>
+                    <div className="mhint" style={micError ? { color: "var(--coral)" } : undefined}>{micError ? micError : sttBusy ? "Đang nghe bạn nói…" : recording ? "Đang ghi… thả ra để gửi" : "Ấn giữ để nói — hoặc bấm ⌨ để gõ"}</div>
                   </>
                 ) : (
                   <div className="typewrap">

@@ -14,6 +14,18 @@ app.use(express.json({ limit: "1mb" }));
 // (e.g. an external ping to keep Render awake, and the app pinging on load).
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
+// ---- GET /api/admin/stats?key=... : founder-only behaviour metrics ----
+const ADMIN_KEY = process.env.ADMIN_KEY || "";
+app.get("/api/admin/stats", async (req, res) => {
+  try {
+    if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) return res.status(403).json({ error: "forbidden" });
+    res.json(await db.getAdminStats());
+  } catch (e) {
+    console.error("admin stats error:", e.message);
+    res.status(500).json({ error: "stats failed" });
+  }
+});
+
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 const MODEL = process.env.TOKI_MODEL || "claude-haiku-4-5-20251001";
 if (!API_KEY) console.warn("WARNING: ANTHROPIC_API_KEY is not set.");

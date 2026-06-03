@@ -308,6 +308,70 @@ async function loginWithGoogle(email, name, deviceUserId) {
   return getUser(base);
 }
 
+// Aggregate stats for the founder to watch behaviour (no per-user PII beyond counts).
+// Retention here = "of users whose FIRST active day was N+ days ago, how many came
+// back on a later day". D1 = returned the day after first use; D7 = returned 7+ days later.
+async function getAdminStats() {
+  const q = (s, p = []) => pool.query(s, p).then((r) => r.rows);
+
+  const totalUsers = (await q("SELECT COUNT(*)::int AS n FROM users"))[0].n;
+  const loggedIn = (await q("SELECT COUNT(*)::int AS n FROM users WHERE email IS NOT NULL"))[0].n;
+  // Users who actually spoke at least one real turn.
+  const spokeUsers = (await q(
+    "SELECT COUNT(DISTINCT s.user_id)::int AS n FROM sessions s WHERE s.words_spoken > 0"
+  ))[0].n;
+  const totalSessions = (await q("SELECT COUNT(*)::int AS n FROM sessions WHERE words_spoken > 0"))[0].n;
+
+  // Distinct active days per user (a "day" = a date on which they spoke a turn).
+  // We derive first day and the set of active days from turns of role 'user'.
+  const dayRows = await q(`
+    SELECT s.user_id AS uid, substring(t.created_at, 1, 10) AS day
+    FROM turns t JOIN sessions s ON t.session_id = s.id
+    WHERE t.role = 'user'
+    GROUP BY s.user_id, substring(t.created_at, 1, 10)
+  `);
+  // Group days by user.
+  const byUser = new Map();
+  for (const r of dayRows) {
+    if (!byUser.has(r.uid)) byUser.set(r.uid, []);
+    byUser.get(r.uid).push(r.day);
+  }
+  let returnedNextDay = 0;   // came back on a different (later) day at all
+  let multiDayUsers = 0;     // used on 2+ distinct days
+  for (const [, days] of byUser) {
+    const uniq = Array.from(new Set(days)).sort();
+    if (uniq.length >= 2) { multiDayUsers++; returnedNextDay++; }
+  }
+  const activeUsers = byUser.size;
+  const returnRate = activeUsers ? Math.round((multiDayUsers / activeUsers) * 100) : 0;
+
+  // Active today / last 7 days.
+  const today = new Date().toISOString().slice(0, 10);
+  const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+  const activeToday = (await q(
+    "SELECT COUNT(DISTINCT s.user_id)::int AS n FROM turns t JOIN sessions s ON t.session_id = s.id WHERE t.role='user' AND t.created_at LIKE $1",
+    [today + "%"]
+  ))[0].n;
+  const active7d = (await q(
+    "SELECT COUNT(DISTINCT s.user_id)::int AS n FROM turns t JOIN sessions s ON t.session_id = s.id WHERE t.role='user' AND substring(t.created_at,1,10) >= $1",
+    [weekAgo]
+  ))[0].n;
+
+  // Most-used topics (by session anchor in the first user turn isn't stored, so
+  // approximate by counting sessions; topic seed isn't persisted — skip if absent).
+  return {
+    totalUsers,
+    loggedIn,
+    spokeUsers,
+    totalSessions,
+    activeUsers,            // users who spoke on at least one day
+    multiDayUsers,          // users who came back on 2+ distinct days
+    returnRatePercent: returnRate,
+    activeToday,
+    active7d,
+  };
+}
+
 module.exports = {
   init,
   startSession, getSession, ensureUser, getUser,
@@ -316,4 +380,5 @@ module.exports = {
   getWeaknesses, getProgress, getSessionErrorCount, getUserTurnsToday,
   setJob,
   getUserByEmail, linkIdentity, mergeUser, loginWithGoogle,
+  getAdminStats,
 };
