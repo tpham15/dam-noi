@@ -60,6 +60,7 @@ async function init() {
       word TEXT NOT NULL,
       meaning_vi TEXT NOT NULL DEFAULT '',
       example_en TEXT NOT NULL DEFAULT '',
+      situation_vi TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       UNIQUE(user_id, word)
     );
@@ -71,6 +72,7 @@ async function init() {
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS job TEXT NOT NULL DEFAULT ''");
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT");
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT");
+  await pool.query("ALTER TABLE vocab ADD COLUMN IF NOT EXISTS situation_vi TEXT NOT NULL DEFAULT ''");
 }
 
 async function getUser(userId) {
@@ -166,9 +168,13 @@ async function bumpSpoken(userId, sessionId, seconds, words) {
 async function saveVocab(userId, items) {
   for (const v of items || []) {
     if (v && v.word) {
+      // Single words: lowercase for clean dedup. Phrases/sentences: keep original
+      // casing so "I'm swamped with work" doesn't become all-lowercase and ugly.
+      const raw = String(v.word).trim();
+      const word = raw.includes(" ") ? raw : raw.toLowerCase();
       await pool.query(
-        "INSERT INTO vocab (user_id, word, meaning_vi, example_en, created_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (user_id, word) DO NOTHING",
-        [userId, String(v.word).trim().toLowerCase(), v.meaning_vi || "", v.example_en || "", now()]
+        "INSERT INTO vocab (user_id, word, meaning_vi, example_en, situation_vi, created_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (user_id, word) DO NOTHING",
+        [userId, word, v.meaning_vi || "", v.example_en || "", v.situation_vi || "", now()]
       );
     }
   }
@@ -176,7 +182,7 @@ async function saveVocab(userId, items) {
 
 async function getVocabForUser(userId, limit = 200) {
   const r = await pool.query(
-    "SELECT word, meaning_vi, example_en, created_at FROM vocab WHERE user_id = $1 ORDER BY id DESC LIMIT $2",
+    "SELECT word, meaning_vi, example_en, situation_vi, created_at FROM vocab WHERE user_id = $1 ORDER BY id DESC LIMIT $2",
     [userId, limit]
   );
   return r.rows;

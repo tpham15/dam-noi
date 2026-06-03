@@ -566,6 +566,7 @@ const STYLE = `
 .vocab .vw{font-size:17px;color:var(--ink);font-weight:800;}
 .vocab .vm{font-size:14px;color:var(--coral);font-weight:700;margin-top:2px;}
 .vocab .ve{font-size:13.5px;color:var(--muted);font-style:italic;font-weight:600;margin-top:5px;}
+.vocab .vs{font-size:12.5px;color:var(--sun);font-weight:700;margin-top:5px;}
 .pgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
 .pstat{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;text-align:center;}
 .pstat .pn{font-family:'Space Grotesk',sans-serif;letter-spacing:-0.02em;font-size:30px;font-weight:600;color:var(--green-d);line-height:1;}
@@ -1238,6 +1239,7 @@ export default function App() {
                     <div className="vw">{v.word}</div>
                     {v.meaning_vi ? <div className="vm">{v.meaning_vi}</div> : null}
                     {v.example_en ? <div className="ve">“{v.example_en}”</div> : null}
+                    {v.situation_vi ? <div className="vs">💬 {v.situation_vi}</div> : null}
                   </div>
                 ))}
               </div>

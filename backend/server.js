@@ -61,6 +61,7 @@ const TOKI_TOOL = {
             word: { type: "string" },
             meaning_vi: { type: "string" },
             example_en: { type: "string" },
+            situation_vi: { type: "string" },
           },
         },
       },
