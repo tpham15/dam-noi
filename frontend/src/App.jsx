@@ -96,7 +96,7 @@ const TOPICS = [
       { vi: "Điểm mạnh của tôi", scene: "the interviewer asks about the user's strengths" },
       { vi: "Vì sao ứng tuyển", scene: "the interviewer asks why the user wants this job" },
     ] },
-  { id: "coworker", icon: "🌐", vi: "Đồng nghiệp Tây", en: "Foreign coworker", desc: "Tám với đồng nghiệp nước ngoài", seed: "[TOPIC: Chatting with a friendly foreign coworker at the office — casual work small talk, NOT an interview. You play a relaxed international colleague.]", hue: "#4C84C4",
+  { id: "coworker", icon: "🌐", vi: "Đồng nghiệp ngoại quốc", en: "Foreign coworker", desc: "Tám với đồng nghiệp nước ngoài", seed: "[TOPIC: Chatting with a friendly foreign coworker at the office — casual work small talk, NOT an interview. You play a relaxed international colleague.]", hue: "#4C84C4",
     openers: [
       ["Hey! Grabbing a coffee — want one? How's your morning going?", "Chào bạn! Mình đi lấy cà phê nè — làm một ly không? Sáng nay sao rồi?"],
       ["Morning! Did you catch the game last night? Or are you a work-first kind of person?", "Chào buổi sáng! Tối qua có xem trận đấu không? Hay bạn kiểu việc-trước-đã?"],
