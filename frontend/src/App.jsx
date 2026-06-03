@@ -290,6 +290,36 @@ function setUserId(id) { try { localStorage.setItem(DEVICE_KEY, id); } catch {} 
 const JOB_KEY = "damnoi_job";
 function getJob() { try { return localStorage.getItem(JOB_KEY) || ""; } catch { return ""; } }
 function setJob(j) { try { localStorage.setItem(JOB_KEY, j); } catch {} }
+const ACCT_KEY = "moho_account";
+function getAccount() { try { return JSON.parse(localStorage.getItem(ACCT_KEY) || "null"); } catch { return null; } }
+function setAccount(a) { try { a ? localStorage.setItem(ACCT_KEY, JSON.stringify(a)) : localStorage.removeItem(ACCT_KEY); } catch {} }
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
+
+// Send the Google credential to the backend; it returns the account user id.
+async function apiGoogleLogin(credential) {
+  const res = await fetch(`${API}/api/auth/google`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ credential, deviceUserId: getUserId() }),
+  });
+  if (!res.ok) throw new Error("login");
+  return res.json(); // { userId, email, name, streakDays, job }
+}
+
+// Load Google Identity Services script once.
+let googleScriptPromise = null;
+function loadGoogleScript() {
+  if (googleScriptPromise) return googleScriptPromise;
+  googleScriptPromise = new Promise((resolve, reject) => {
+    if (window.google?.accounts?.id) return resolve();
+    const s = document.createElement("script");
+    s.src = "https://accounts.google.com/gsi/client";
+    s.async = true; s.defer = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error("google script failed"));
+    document.head.appendChild(s);
+  });
+  return googleScriptPromise;
+}
 
 async function apiStartSession(topicSeed, greeting) {
   const res = await fetch(`${API}/api/session/start`, {
@@ -317,6 +347,7 @@ async function apiTurn({ userId, sessionId, text, secondsSpoken = 0, silentCount
     encouragement: r.encouragement || "",
     streakDays: r.streakDays,
     errorsThisTurn: r.errorsThisTurn || 0,
+    limitReached: !!r.limitReached,
   };
 }
 
@@ -395,6 +426,7 @@ const STYLE = `
 .streakbar{display:flex;gap:8px;padding:14px 0 2px;flex-wrap:wrap;}
 .pill{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:800;padding:7px 13px;border-radius:30px;border:1px solid var(--line);background:var(--card);}
 .pill.fire{color:var(--coral);} .pill.min{color:var(--green-d);} .pill.book{color:#8E7CC3;}
+.pill.save{color:var(--sun);border-color:#FFB34755;}
 .pill.tap{cursor:pointer;transition:transform .12s,box-shadow .12s;}
 .pill.tap:hover{transform:translateY(-1px);box-shadow:0 6px 14px -8px rgba(0,0,0,.25);}
 .ask{font-family:'Space Grotesk',sans-serif;letter-spacing:-0.02em;font-size:18px;font-weight:600;padding:16px 22px 8px;}
@@ -504,6 +536,9 @@ const STYLE = `
 .bigmic.on:before{content:"";position:absolute;inset:-7px;border-radius:50%;border:3px solid #DD735055;animation:ring 1.2s ease-out infinite;}
 @keyframes ring{0%{transform:scale(1);opacity:.9}100%{transform:scale(1.35);opacity:0}}
 .mhint{font-size:12.5px;color:var(--muted);font-weight:700;text-align:center;}
+.limitbox{text-align:center;padding:10px 14px;}
+.limitt{font-weight:800;color:var(--coral);font-size:16px;}
+.limitd{font-size:13px;color:var(--muted);font-weight:600;margin-top:5px;line-height:1.45;}
 .microw{display:flex;align-items:center;justify-content:center;gap:18px;}
 .kbtoggle,.kbspacer{width:44px;height:44px;flex:none;}
 .kbtoggle{border-radius:50%;border:1px solid var(--line);background:var(--card);color:var(--muted);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:.14s;}
@@ -575,6 +610,8 @@ export default function App() {
   const [starters, setStarters] = useState([]);
   const [showStarters, setShowStarters] = useState(false);
   const [typing, setTyping] = useState(false); // silent-mode text input toggle
+  const [limitHit, setLimitHit] = useState(false); // daily free cap reached
+  const [account, setAccountState] = useState(() => getAccount()); // {email,name} when logged in
   const typingRef = useRef(false);
   useEffect(() => { typingRef.current = typing; }, [typing]);
   const sessionRef = useRef({ userId: null, sessionId: null });
@@ -613,6 +650,7 @@ export default function App() {
   const audioRef = useRef(null);
   const chosenVoiceRef = useRef(null);
   const ttsFailedRef = useRef(false); // once backend TTS is known-unavailable, skip it
+  const ttsCacheRef = useRef(new Map()); // sentence -> object URL, to avoid re-spending TTS quota
   const speakBrowser = useCallback((text) => {
     if (typeof window === "undefined" || !window.speechSynthesis) return;
     try {
@@ -661,6 +699,18 @@ export default function App() {
     if (!ttsRef.current || !enText) return;
     if (window.speechSynthesis) window.speechSynthesis.cancel();
     if (audioRef.current) { try { audioRef.current.pause(); } catch {} }
+    // Reuse cached audio for a sentence we've already fetched (saves Azure quota
+    // on replays / repeated lines).
+    const cached = ttsCacheRef.current.get(enText);
+    if (cached) {
+      try {
+        const a = new Audio(cached);
+        a.playbackRate = slowRef.current ? 0.85 : 1;
+        audioRef.current = a;
+        await a.play();
+        return;
+      } catch {}
+    }
     // Try the high-quality Azure voice from the backend first.
     if (!ttsFailedRef.current) {
       try {
@@ -668,10 +718,10 @@ export default function App() {
         if (r.ok) {
           const blob = await r.blob();
           const url = URL.createObjectURL(blob);
+          ttsCacheRef.current.set(enText, url); // keep for replays
           const a = new Audio(url);
           a.playbackRate = slowRef.current ? 0.85 : 1;
           audioRef.current = a;
-          a.onended = () => URL.revokeObjectURL(url);
           await a.play();
           return;
         }
@@ -733,6 +783,7 @@ export default function App() {
       const roast = stripQ(r.roast_vi);
       setUi((p) => [...p, { who: "t", roast, isFix, en, vi: stripQ(r.vi_translation), enc: r.encouragement }]);
       setChips(r.scaffold_chips || []);
+      if (r.limitReached) { setLimitHit(true); clearSilence(); }
       if (typeof r.streakDays === "number") setStreak(r.streakDays);
       if (r.errorsThisTurn) setErrorCount((c) => c + r.errorsThisTurn);
       speakEn(en); // only English is ever spoken
@@ -746,9 +797,41 @@ export default function App() {
   const handleSend = (text) => { const t = (text != null ? text : input).trim(); if (!t || loading) return; setInput(""); sendTurn(t); };
   const startScene = (s) => { if (loading) return; sendTurn(`[SCENE: ${s.scene}]`, { scene: true, sceneLabel: s.vi }); };
 
+  // Called by Google with the signed credential after the user picks an account.
+  const handleCredential = useCallback(async (response) => {
+    try {
+      const r = await apiGoogleLogin(response.credential);
+      if (r.userId) setUserId(r.userId);
+      const acct = { email: r.email, name: r.name };
+      setAccount(acct); setAccountState(acct);
+      if (typeof r.streakDays === "number") setStreak(r.streakDays);
+    } catch {
+      alert("Đăng nhập chưa được — thử lại nha.");
+    }
+  }, []);
+
+  const doLogin = useCallback(async () => {
+    if (!GOOGLE_CLIENT_ID) { alert("Login chưa cấu hình (thiếu Client ID)."); return; }
+    try {
+      await loadGoogleScript();
+      window.google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleCredential });
+      // Use the One Tap / prompt flow for a one-tap experience.
+      window.google.accounts.id.prompt();
+    } catch {
+      alert("Không tải được Google. Kiểm tra mạng nha.");
+    }
+  }, [handleCredential]);
+
+  const doLogout = useCallback(() => {
+    setAccount(null); setAccountState(null);
+    try { window.google?.accounts?.id?.disableAutoSelect?.(); } catch {}
+    // Keep using the same userId locally; data stays under the account on the server.
+  }, []);
+
   const openTopic = async (tp) => {
     if (starting) return;
     setStarting(true);
+    setLimitHit(false);
     setTopic(tp); setScreen("chat");
     const { opener, openerVi } = pickOpener(tp);
     setUi([{ who: "t", text: opener, vi: openerVi }]);
@@ -917,11 +1000,14 @@ export default function App() {
             <>
               <div className="home-h">
                 <div className="hi">Hôm nay muốn nói gì nào?</div>
-                <h2 className="disp">Chào ní 👋</h2>
+                <h2 className="disp">Chào {account?.name ? account.name.split(" ").slice(-1)[0] : "ní"} 👋</h2>
                 <div className="streakbar">
                   <button className="pill fire tap" onClick={openProgress}><Flame size={15} /> {streak} ngày</button>
                   <button className="pill book tap" onClick={openVocab}><BookOpen size={15} /> Sổ từ vựng</button>
                   <button className="pill min tap" onClick={openProgress}><TrendingUp size={15} /> Hành trình</button>
+                  {account
+                    ? <button className="pill min tap" onClick={doLogout} title={account.email}>Đăng xuất</button>
+                    : <button className="pill save tap" onClick={doLogin}>🔒 Lưu tiến trình</button>}
                 </div>
               </div>
 
@@ -1024,7 +1110,12 @@ export default function App() {
               )}
 
               <div className="inbar">
-                {!typing ? (
+                {limitHit ? (
+                  <div className="limitbox">
+                    <div className="limitt">Hết lượt free hôm nay rồi 😏</div>
+                    <div className="limitd">Mai quay lại khịa tiếp nha ní — hoặc bấm Xong để xem lại buổi hôm nay.</div>
+                  </div>
+                ) : !typing ? (
                   <>
                     <div className="microw">
                       <button className="kbtoggle" title="Gõ chữ (chế độ im lặng)" onClick={() => setTyping(true)}>

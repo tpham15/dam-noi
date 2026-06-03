@@ -4,6 +4,7 @@ const express = require("express");
 const cors = require("cors");
 const db = require("./db");
 const { buildSystemPrompt, OPENING } = require("./prompt");
+const { OAuth2Client } = require("google-auth-library");
 
 const app = express();
 app.use(cors());
@@ -12,6 +13,10 @@ app.use(express.json({ limit: "1mb" }));
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 const MODEL = process.env.TOKI_MODEL || "claude-haiku-4-5-20251001";
 if (!API_KEY) console.warn("WARNING: ANTHROPIC_API_KEY is not set.");
+
+// Google login: verify ID tokens against your OAuth client ID.
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
+const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // ---- The structured-output tool (forces clean JSON every turn) ----
 const TOKI_TOOL = {
@@ -115,18 +120,47 @@ function countWords(s) {
 }
 
 // ---- POST /api/session/start : create or resume a user, open a session ----
-app.post("/api/session/start", (req, res) => {
+// ---- POST /api/auth/google : verify a Google ID token, return the account ----
+// Body: { credential: <google ID token>, deviceUserId?: <current guest id> }
+app.post("/api/auth/google", async (req, res) => {
+  try {
+    if (!GOOGLE_CLIENT_ID) return res.status(501).json({ error: "login not configured" });
+    const { credential, deviceUserId } = req.body || {};
+    if (!credential) return res.status(400).json({ error: "credential required" });
+
+    // Verify the token really came from Google and was issued for our app.
+    const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: GOOGLE_CLIENT_ID });
+    const payload = ticket.getPayload();
+    if (!payload || !payload.email || !payload.email_verified) {
+      return res.status(401).json({ error: "invalid token" });
+    }
+
+    const user = await db.loginWithGoogle(payload.email, payload.name || "", deviceUserId);
+    res.json({
+      userId: user.id,
+      email: user.email,
+      name: user.name || payload.name || "",
+      streakDays: user.streak_days,
+      job: user.job || "",
+    });
+  } catch (e) {
+    console.error("google auth error:", e.message);
+    res.status(401).json({ error: "auth failed" });
+  }
+});
+
+app.post("/api/session/start", async (req, res) => {
   try {
     const { userId, topicSeed, greeting, job } = req.body || {};
-    const s = db.startSession(userId);
-    if (job) { try { db.setJob(s.userId, job); } catch {} }
+    const s = await db.startSession(userId);
+    if (job) { try { await db.setJob(s.userId, job); } catch {} }
     const opener = greeting || OPENING;
     // seed the session anchor (topic/role) + opening greeting into history
     const anchor = topicSeed
       ? `[SESSION_START] ${topicSeed} session_number=${s.sessionNumber} confidence=${s.confidenceLevel}`
       : `[SESSION_START] session_number=${s.sessionNumber} confidence=${s.confidenceLevel}`;
-    db.logTurn(s.sessionId, "user", anchor);
-    db.logTurn(s.sessionId, "assistant", opener);
+    await db.logTurn(s.sessionId, "user", anchor);
+    await db.logTurn(s.sessionId, "assistant", opener);
     res.json({
       userId: s.userId,
       sessionId: s.sessionId,
@@ -144,37 +178,55 @@ app.post("/api/session/start", (req, res) => {
 app.post("/api/turn", async (req, res) => {
   try {
     const { userId, sessionId, text, secondsSpoken = 0, silentCount = 0 } = req.body || {};
-    const session = db.getSession.get(sessionId);
-    const user = db.getUser.get(userId);
+    const session = await db.getSession(sessionId);
+    const user = await db.getUser(userId);
     if (!session || !user) return res.status(404).json({ error: "unknown session/user" });
+
+    // Daily free cap: stop before any AI call once the user hits the limit.
+    const DAILY_LIMIT = Number(process.env.DAILY_TURN_LIMIT || 40);
+    if (silentCount === 0 && (await db.getUserTurnsToday(userId)) >= DAILY_LIMIT) {
+      return res.json({
+        roast_vi: "Ní nói sung dữ luôn á! Hết lượt free hôm nay rồi, mai quay lại khịa tiếp nha 😏",
+        teach_en: "",
+        next_en: "That's your free practice for today — come back tomorrow, okay?",
+        vi_translation: "Đó là phần luyện miễn phí hôm nay của bạn — mai quay lại nhé!",
+        scaffold_chips: [],
+        used_vietnamese: true,
+        encouragement: "",
+        streakDays: user.streak_days,
+        errorsThisTurn: 0,
+        vocabThisTurn: 0,
+        limitReached: true,
+      });
+    }
 
     // Build the user turn content. A silence signal replaces normal text.
     const content = silentCount > 0 ? `[USER_SILENT count=${silentCount}]` : (text || "").trim();
     if (!content) return res.status(400).json({ error: "empty turn" });
 
     // Persist the user turn (skip storing silence as a "spoken" turn's words)
-    db.logTurn(sessionId, "user", content);
+    await db.logTurn(sessionId, "user", content);
     if (silentCount === 0) {
-      db.bumpSpoken(userId, sessionId, secondsSpoken, countWords(content));
+      await db.bumpSpoken(userId, sessionId, secondsSpoken, countWords(content));
     }
 
     const system = buildSystemPrompt({
       sessionNumber: session.session_number,
       confidenceLevel: user.confidence_level,
       streakDays: user.streak_days,
-      weaknesses: db.getWeaknesses(userId),
+      weaknesses: await db.getWeaknesses(userId),
       job: user.job,
-      errorCount: db.getSessionErrorCount(sessionId),
+      errorCount: await db.getSessionErrorCount(sessionId),
     });
-    const messages = db.historyFor(sessionId);
+    const messages = await db.historyFor(sessionId);
 
     const reply = await askToki({ system, messages });
 
     // Store a combined assistant turn so history stays coherent for the model.
     const combined = [reply.roast_vi, reply.teach_en, reply.next_en].filter(Boolean).join(" ");
-    db.logTurn(sessionId, "assistant", combined);
-    db.logErrors(userId, sessionId, reply.errors_noticed); // hidden, for review only
-    if (reply.vocab && reply.vocab.length) db.saveVocab(userId, reply.vocab); // notebook
+    await db.logTurn(sessionId, "assistant", combined);
+    await db.logErrors(userId, sessionId, reply.errors_noticed); // hidden, for review only
+    if (reply.vocab && reply.vocab.length) await db.saveVocab(userId, reply.vocab); // notebook
 
     res.json({
       roast_vi: reply.roast_vi,
@@ -280,11 +332,11 @@ app.post("/api/tts", async (req, res) => {
 });
 
 // ---- GET /api/review?userId=... : the optional, positive review list ----
-app.get("/api/review", (req, res) => {
+app.get("/api/review", async (req, res) => {
   try {
     const { userId } = req.query;
     if (!userId) return res.status(400).json({ error: "userId required" });
-    const list = db.getErrorsForUser(userId, 50);
+    const list = await db.getErrorsForUser(userId, 50);
     res.json({ items: list });
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
@@ -292,22 +344,22 @@ app.get("/api/review", (req, res) => {
 });
 
 // ---- GET /api/vocab?userId=... : the saved-words notebook ----
-app.get("/api/vocab", (req, res) => {
+app.get("/api/vocab", async (req, res) => {
   try {
     const { userId } = req.query;
     if (!userId) return res.status(400).json({ error: "userId required" });
-    res.json({ items: db.getVocabForUser(userId, 200) });
+    res.json({ items: await db.getVocabForUser(userId, 200) });
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
   }
 });
 
 // ---- GET /api/progress?userId=... : journey stats ----
-app.get("/api/progress", (req, res) => {
+app.get("/api/progress", async (req, res) => {
   try {
     const { userId } = req.query;
     if (!userId) return res.status(400).json({ error: "userId required" });
-    const p = db.getProgress(userId);
+    const p = await db.getProgress(userId);
     if (!p) return res.status(404).json({ error: "unknown user" });
     res.json(p);
   } catch (e) {
@@ -316,4 +368,11 @@ app.get("/api/progress", (req, res) => {
 });
 
 const PORT = process.env.PORT || 8787;
-app.listen(PORT, () => console.log(`Dám Nói backend on http://localhost:${PORT}`));
+db.init()
+  .then(() => {
+    app.listen(PORT, () => console.log(`MoHo backend on http://localhost:${PORT}`));
+  })
+  .catch((e) => {
+    console.error("Failed to init database:", e.message);
+    process.exit(1);
+  });

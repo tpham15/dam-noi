@@ -1,212 +1,307 @@
-// db.js — persistence for Dám Nói (users, sessions, turns, errors, streak).
-const Database = require("better-sqlite3");
-const path = require("path");
+// db.js — persistence for MoHo (users, sessions, turns, errors, streak, vocab).
+// Postgres version (async). Set DATABASE_URL in the environment (Render Postgres
+// provides this). All exported functions are async — callers must await them.
+const { Pool } = require("pg");
 
-const db = new Database(path.join(__dirname, "damnoi.db"));
-db.pragma("journal_mode = WAL");
-
-db.exec(`
-CREATE TABLE IF NOT EXISTS users (
-  id TEXT PRIMARY KEY,
-  created_at TEXT NOT NULL,
-  confidence_level TEXT NOT NULL DEFAULT 'low',
-  streak_days INTEGER NOT NULL DEFAULT 0,
-  last_active_date TEXT,              -- YYYY-MM-DD
-  total_sessions INTEGER NOT NULL DEFAULT 0,
-  total_seconds INTEGER NOT NULL DEFAULT 0,
-  total_words INTEGER NOT NULL DEFAULT 0,
-  job TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS sessions (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  session_number INTEGER NOT NULL,
-  started_at TEXT NOT NULL,
-  seconds_spoken INTEGER NOT NULL DEFAULT 0,
-  words_spoken INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS turns (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL,
-  role TEXT NOT NULL,                 -- 'user' | 'assistant'
-  content TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS errors (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id TEXT NOT NULL,
-  session_id TEXT NOT NULL,
-  said TEXT NOT NULL,
-  natural TEXT NOT NULL,
-  type TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS vocab (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id TEXT NOT NULL,
-  word TEXT NOT NULL,
-  meaning_vi TEXT NOT NULL DEFAULT '',
-  example_en TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL,
-  UNIQUE(user_id, word)
-);
-`);
-
-// Safe migration: add the job column to pre-existing databases.
-try {
-  const cols = db.prepare("PRAGMA table_info(users)").all().map((c) => c.name);
-  if (!cols.includes("job")) db.exec("ALTER TABLE users ADD COLUMN job TEXT NOT NULL DEFAULT ''");
-} catch {}
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  // Render's managed Postgres requires SSL; locally you can set PGSSL=off.
+  ssl: process.env.PGSSL === "off" ? false : { rejectUnauthorized: false },
+});
 
 const today = () => new Date().toISOString().slice(0, 10);
 const now = () => new Date().toISOString();
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+function dayDiff(a, b) { return Math.round((Date.parse(b) - Date.parse(a)) / 86400000); }
 
-// Days between two YYYY-MM-DD strings.
-function dayDiff(a, b) {
-  return Math.round((Date.parse(b) - Date.parse(a)) / 86400000);
+// Run the schema once at startup. Safe to run repeatedly (IF NOT EXISTS).
+async function init() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL,
+      confidence_level TEXT NOT NULL DEFAULT 'low',
+      streak_days INTEGER NOT NULL DEFAULT 0,
+      last_active_date TEXT,
+      total_sessions INTEGER NOT NULL DEFAULT 0,
+      total_seconds INTEGER NOT NULL DEFAULT 0,
+      total_words INTEGER NOT NULL DEFAULT 0,
+      job TEXT NOT NULL DEFAULT '',
+      email TEXT,
+      name TEXT
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      session_number INTEGER NOT NULL,
+      started_at TEXT NOT NULL,
+      seconds_spoken INTEGER NOT NULL DEFAULT 0,
+      words_spoken INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS turns (
+      id BIGSERIAL PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS errors (
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      said TEXT NOT NULL,
+      corrected TEXT NOT NULL,
+      type TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS vocab (
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      word TEXT NOT NULL,
+      meaning_vi TEXT NOT NULL DEFAULT '',
+      example_en TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      UNIQUE(user_id, word)
+    );
+    CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
+    CREATE INDEX IF NOT EXISTS idx_errors_user ON errors(user_id);
+    CREATE INDEX IF NOT EXISTS idx_vocab_user ON vocab(user_id);
+  `);
+  // Safe migrations for pre-existing databases (add columns if missing).
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS job TEXT NOT NULL DEFAULT ''");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT");
 }
 
-const getUser = db.prepare("SELECT * FROM users WHERE id = ?");
-const insertUser = db.prepare(
-  "INSERT INTO users (id, created_at, confidence_level) VALUES (?, ?, 'low')"
-);
+async function getUser(userId) {
+  const r = await pool.query("SELECT * FROM users WHERE id = $1", [userId]);
+  return r.rows[0] || null;
+}
 
-function ensureUser(userId) {
-  let u = userId && getUser.get(userId);
-  if (u) return u;
+async function ensureUser(userId) {
+  const existing = userId && (await getUser(userId));
+  if (existing) return existing;
   const id = userId || uid();
-  insertUser.run(id, now());
-  return getUser.get(id);
+  await pool.query(
+    "INSERT INTO users (id, created_at, confidence_level) VALUES ($1, $2, 'low') ON CONFLICT (id) DO NOTHING",
+    [id, now()]
+  );
+  return getUser(id);
 }
 
-// Update streak when a new session starts. Returns the user row after update.
-const updateStreak = db.prepare(
-  "UPDATE users SET streak_days = ?, last_active_date = ?, total_sessions = total_sessions + 1 WHERE id = ?"
-);
-
-function startSession(userId) {
-  const u = ensureUser(userId);
+async function startSession(userId) {
+  const u = await ensureUser(userId);
   const t = today();
   let streak = u.streak_days;
   if (u.last_active_date === t) {
-    // already active today — streak unchanged
+    // already active today — unchanged
   } else if (u.last_active_date && dayDiff(u.last_active_date, t) === 1) {
-    streak = u.streak_days + 1; // consecutive day
+    streak = u.streak_days + 1;
   } else {
-    streak = 1; // first ever, or streak broken — restart at 1
+    streak = 1;
   }
-  const sessionNumber = u.total_sessions + 1; // capture BEFORE the update
-  updateStreak.run(streak, t, u.id);
-
+  const sessionNumber = u.total_sessions + 1;
+  await pool.query(
+    "UPDATE users SET streak_days = $1, last_active_date = $2, total_sessions = total_sessions + 1 WHERE id = $3",
+    [streak, t, u.id]
+  );
   const sessionId = uid();
-  db.prepare(
-    "INSERT INTO sessions (id, user_id, session_number, started_at) VALUES (?, ?, ?, ?)"
-  ).run(sessionId, u.id, sessionNumber, now());
-
-  return {
-    userId: u.id,
-    sessionId,
-    sessionNumber,
-    confidenceLevel: u.confidence_level,
-    streakDays: streak,
-  };
+  await pool.query(
+    "INSERT INTO sessions (id, user_id, session_number, started_at) VALUES ($1, $2, $3, $4)",
+    [sessionId, u.id, sessionNumber, now()]
+  );
+  return { userId: u.id, sessionId, sessionNumber, confidenceLevel: u.confidence_level, streakDays: streak };
 }
 
-const getSession = db.prepare("SELECT * FROM sessions WHERE id = ?");
-const insertTurn = db.prepare(
-  "INSERT INTO turns (session_id, role, content, created_at) VALUES (?, ?, ?, ?)"
-);
-const getTurns = db.prepare(
-  "SELECT role, content FROM turns WHERE session_id = ? ORDER BY id ASC"
-);
-
-function logTurn(sessionId, role, content) {
-  insertTurn.run(sessionId, role, content, now());
+async function getSession(sessionId) {
+  const r = await pool.query("SELECT * FROM sessions WHERE id = $1", [sessionId]);
+  return r.rows[0] || null;
 }
 
-function historyFor(sessionId) {
-  return getTurns.all(sessionId).map((r) => ({ role: r.role, content: r.content }));
+async function logTurn(sessionId, role, content) {
+  await pool.query(
+    "INSERT INTO turns (session_id, role, content, created_at) VALUES ($1, $2, $3, $4)",
+    [sessionId, role, content, now()]
+  );
 }
 
-const insertError = db.prepare(
-  "INSERT INTO errors (user_id, session_id, said, natural, type, created_at) VALUES (?, ?, ?, ?, ?, ?)"
-);
-function logErrors(userId, sessionId, list) {
-  const tx = db.transaction((items) => {
-    for (const e of items) {
-      if (e && e.said && e.natural) insertError.run(userId, sessionId, e.said, e.natural, e.type || "other", now());
+async function historyFor(sessionId) {
+  const r = await pool.query(
+    "SELECT role, content FROM turns WHERE session_id = $1 ORDER BY id ASC",
+    [sessionId]
+  );
+  return r.rows.map((x) => ({ role: x.role, content: x.content }));
+}
+
+async function logErrors(userId, sessionId, list) {
+  for (const e of list || []) {
+    if (e && e.said && e.natural) {
+      await pool.query(
+        "INSERT INTO errors (user_id, session_id, said, corrected, type, created_at) VALUES ($1,$2,$3,$4,$5,$6)",
+        [userId, sessionId, e.said, e.natural, e.type || "other", now()]
+      );
     }
-  });
-  tx(list || []);
-}
-const getErrors = db.prepare(
-  "SELECT said, natural, type, created_at FROM errors WHERE user_id = ? ORDER BY id DESC LIMIT ?"
-);
-
-function bumpSpoken(userId, sessionId, seconds, words) {
-  db.prepare(
-    "UPDATE sessions SET seconds_spoken = seconds_spoken + ?, words_spoken = words_spoken + ? WHERE id = ?"
-  ).run(seconds, words, sessionId);
-  db.prepare(
-    "UPDATE users SET total_seconds = total_seconds + ?, total_words = total_words + ? WHERE id = ?"
-  ).run(seconds, words, userId);
+  }
 }
 
-// --- Vocab notebook (after-conversation) ---
-const insertVocab = db.prepare(
-  "INSERT OR IGNORE INTO vocab (user_id, word, meaning_vi, example_en, created_at) VALUES (?, ?, ?, ?, ?)"
-);
-function saveVocab(userId, items) {
-  const tx = db.transaction((list) => {
-    for (const v of list) {
-      if (v && v.word) insertVocab.run(userId, String(v.word).trim().toLowerCase(), v.meaning_vi || "", v.example_en || "", now());
+async function getErrorsForUser(userId, limit = 50) {
+  const r = await pool.query(
+    "SELECT said, corrected AS natural, type, created_at FROM errors WHERE user_id = $1 ORDER BY id DESC LIMIT $2",
+    [userId, limit]
+  );
+  return r.rows;
+}
+
+async function bumpSpoken(userId, sessionId, seconds, words) {
+  await pool.query(
+    "UPDATE sessions SET seconds_spoken = seconds_spoken + $1, words_spoken = words_spoken + $2 WHERE id = $3",
+    [seconds, words, sessionId]
+  );
+  await pool.query(
+    "UPDATE users SET total_seconds = total_seconds + $1, total_words = total_words + $2 WHERE id = $3",
+    [seconds, words, userId]
+  );
+}
+
+async function saveVocab(userId, items) {
+  for (const v of items || []) {
+    if (v && v.word) {
+      await pool.query(
+        "INSERT INTO vocab (user_id, word, meaning_vi, example_en, created_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (user_id, word) DO NOTHING",
+        [userId, String(v.word).trim().toLowerCase(), v.meaning_vi || "", v.example_en || "", now()]
+      );
     }
-  });
-  tx(items || []);
-}
-const getVocab = db.prepare(
-  "SELECT word, meaning_vi, example_en, created_at FROM vocab WHERE user_id = ? ORDER BY id DESC LIMIT ?"
-);
-
-// --- Weakness analysis: which error types recur most for this user ---
-const errorTypeCounts = db.prepare(
-  "SELECT type, COUNT(*) AS n FROM errors WHERE user_id = ? GROUP BY type ORDER BY n DESC LIMIT 3"
-);
-function getWeaknesses(userId) {
-  try { return errorTypeCounts.all(userId).map((r) => ({ type: r.type, n: r.n })); }
-  catch { return []; }
+  }
 }
 
-// Count how many errors the user has made in a given session (for escalating sass).
-const sessionErrCount = db.prepare("SELECT COUNT(*) AS n FROM errors WHERE session_id = ?");
-function getSessionErrorCount(sessionId) {
-  try { return sessionErrCount.get(sessionId).n || 0; }
-  catch { return 0; }
+async function getVocabForUser(userId, limit = 200) {
+  const r = await pool.query(
+    "SELECT word, meaning_vi, example_en, created_at FROM vocab WHERE user_id = $1 ORDER BY id DESC LIMIT $2",
+    [userId, limit]
+  );
+  return r.rows;
 }
 
-// --- Progress stats for the journey screen ---
-function getProgress(userId) {
-  const u = getUser.get(userId);
+async function getWeaknesses(userId) {
+  try {
+    const r = await pool.query(
+      "SELECT type, COUNT(*)::int AS n FROM errors WHERE user_id = $1 GROUP BY type ORDER BY n DESC LIMIT 3",
+      [userId]
+    );
+    return r.rows.map((x) => ({ type: x.type, n: x.n }));
+  } catch { return []; }
+}
+
+async function getUserTurnsToday(userId) {
+  try {
+    const r = await pool.query(
+      "SELECT COUNT(*)::int AS n FROM turns t JOIN sessions s ON t.session_id = s.id WHERE s.user_id = $1 AND t.role = 'user' AND t.created_at LIKE $2",
+      [userId, today() + "%"]
+    );
+    return r.rows[0].n || 0;
+  } catch { return 0; }
+}
+
+async function getSessionErrorCount(sessionId) {
+  try {
+    const r = await pool.query("SELECT COUNT(*)::int AS n FROM errors WHERE session_id = $1", [sessionId]);
+    return r.rows[0].n || 0;
+  } catch { return 0; }
+}
+
+async function getProgress(userId) {
+  const u = await getUser(userId);
   if (!u) return null;
-  const errN = db.prepare("SELECT COUNT(*) AS n FROM errors WHERE user_id = ?").get(userId).n;
-  const vocabN = db.prepare("SELECT COUNT(*) AS n FROM vocab WHERE user_id = ?").get(userId).n;
+  const e = await pool.query("SELECT COUNT(*)::int AS n FROM errors WHERE user_id = $1", [userId]);
+  const v = await pool.query("SELECT COUNT(*)::int AS n FROM vocab WHERE user_id = $1", [userId]);
   return {
     streakDays: u.streak_days,
     totalSessions: u.total_sessions,
     totalSeconds: u.total_seconds,
     totalWords: u.total_words,
-    correctionsLearned: errN,
-    vocabSaved: vocabN,
+    correctionsLearned: e.rows[0].n,
+    vocabSaved: v.rows[0].n,
   };
 }
 
+async function setJob(userId, job) {
+  await pool.query("UPDATE users SET job = $1 WHERE id = $2", [String(job || "").slice(0, 40), userId]);
+}
+
+// --- Google login support ---
+
+// Find an existing account by Google email.
+async function getUserByEmail(email) {
+  const r = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
+  return r.rows[0] || null;
+}
+
+// Attach Google identity (email+name) to an existing user row.
+async function linkIdentity(userId, email, name) {
+  await pool.query("UPDATE users SET email = $1, name = $2 WHERE id = $3", [email, name || "", userId]);
+}
+
+// Move all data owned by `fromId` (a device user) over to `toId` (the account),
+// then delete the now-empty device user. Used when a guest logs in and we want to
+// keep the streak/vocab/history they built before signing in.
+async function mergeUser(fromId, toId) {
+  if (!fromId || !toId || fromId === toId) return;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    // Re-point owned rows.
+    await client.query("UPDATE sessions SET user_id = $1 WHERE user_id = $2", [toId, fromId]);
+    await client.query("UPDATE errors SET user_id = $1 WHERE user_id = $2", [toId, fromId]);
+    // Vocab has a UNIQUE(user_id, word) — move only words the account doesn't already have, drop the rest.
+    await client.query(
+      "UPDATE vocab SET user_id = $1 WHERE user_id = $2 AND word NOT IN (SELECT word FROM vocab WHERE user_id = $1)",
+      [toId, fromId]
+    );
+    await client.query("DELETE FROM vocab WHERE user_id = $1", [fromId]);
+    // Combine the running totals onto the account; keep the higher streak.
+    await client.query(
+      `UPDATE users SET
+         total_sessions = total_sessions + COALESCE((SELECT total_sessions FROM users WHERE id = $2), 0),
+         total_seconds  = total_seconds  + COALESCE((SELECT total_seconds  FROM users WHERE id = $2), 0),
+         total_words    = total_words    + COALESCE((SELECT total_words    FROM users WHERE id = $2), 0),
+         streak_days    = GREATEST(streak_days, COALESCE((SELECT streak_days FROM users WHERE id = $2), 0))
+       WHERE id = $1`,
+      [toId, fromId]
+    );
+    await client.query("DELETE FROM users WHERE id = $1", [fromId]);
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// The main login entry point: given a verified Google email+name and the
+// current device userId (guest), return the account user id to use going forward.
+async function loginWithGoogle(email, name, deviceUserId) {
+  const account = await getUserByEmail(email);
+  if (account) {
+    // Existing account: merge the guest's recent data in, then use the account.
+    if (deviceUserId && deviceUserId !== account.id) {
+      const dev = await getUser(deviceUserId);
+      if (dev && !dev.email) await mergeUser(deviceUserId, account.id);
+    }
+    return account;
+  }
+  // No account yet: promote the current device user into the account (or make one).
+  const base = (deviceUserId && (await getUser(deviceUserId))) ? deviceUserId : (await ensureUser(null)).id;
+  await linkIdentity(base, email, name);
+  return getUser(base);
+}
+
 module.exports = {
+  init,
   startSession, getSession, ensureUser, getUser,
-  logTurn, historyFor, logErrors,
-  getErrorsForUser: (userId, limit = 50) => getErrors.all(userId, limit),
-  bumpSpoken,
-  saveVocab, getVocabForUser: (userId, limit = 200) => getVocab.all(userId, limit),
-  getWeaknesses, getProgress, getSessionErrorCount,
-  setJob: (userId, job) => db.prepare("UPDATE users SET job = ? WHERE id = ?").run(String(job || "").slice(0, 40), userId),
+  logTurn, historyFor, logErrors, getErrorsForUser,
+  bumpSpoken, saveVocab, getVocabForUser,
+  getWeaknesses, getProgress, getSessionErrorCount, getUserTurnsToday,
+  setJob,
+  getUserByEmail, linkIdentity, mergeUser, loginWithGoogle,
 };
