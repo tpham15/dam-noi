@@ -620,7 +620,7 @@ function Toki({ size }) {
 }
 
 export default function App() {
-  const [screen, setScreen] = useState("welcome"); // welcome | home | chat
+  const [screen, setScreen] = useState("welcome");
   const [topic, setTopic] = useState(null);
   const [ui, setUi] = useState([]);
   const [chips, setChips] = useState([]);
@@ -639,7 +639,7 @@ export default function App() {
   const [progress, setProgress] = useState(null);
   const [showBrag, setShowBrag] = useState(false);
   const [revealed, setRevealed] = useState({}); 
-  const [elapsed, setElapsed] = useState(0); // Only updated when saving/finishing to prevent re-renders
+  const [elapsed, setElapsed] = useState(0); 
   const [words, setWords] = useState(0);
   const [streak, setStreak] = useState(1);
   const [starting, setStarting] = useState(false);
@@ -665,10 +665,7 @@ export default function App() {
   useEffect(() => { ttsRef.current = ttsOn; }, [ttsOn]);
   useEffect(() => { slowRef.current = slow; }, [slow]);
 
-  // Ref thay thế bộ đếm re-render
   const elapsedRef = useRef(0);
-  
-  // Các ref quản lý luồng Voice để chống nhiễu / đè âm thanh
   const speakGenRef = useRef(0);
   const speakTimeoutRef = useRef(null);
   
@@ -808,7 +805,6 @@ export default function App() {
 
   const speakSeq = useCallback((_viText, enText) => speakEn(enText), [speakEn]);
 
-  // Hủy âm thanh tổng lực
   const stopAllAudio = useCallback(() => {
     speakGenRef.current++; 
     if (speakTimeoutRef.current) {
@@ -819,13 +815,12 @@ export default function App() {
     if (audioElRef.current) {
       try {
         audioElRef.current.pause();
-        audioElRef.current.removeAttribute('src'); // Xóa sạch URL cũ để trình duyệt ngưng tải
-        audioElRef.current.load(); // Ép trình duyệt hủy tiến trình phát nhạc
+        audioElRef.current.removeAttribute('src'); 
+        audioElRef.current.load(); 
       } catch {}
     }
   }, []);
 
-  // Giám sát màn hình: Nếu không phải màn hình Chat thì hủy tiếng ngay lập tức
   useEffect(() => {
     if (screen !== "chat") {
       stopAllAudio();
@@ -881,11 +876,11 @@ export default function App() {
     let secondsSpoken = 0;
     if (opts.scene) {
       silenceRef.current.count = 0;
-      setUi((p) => [...p, { who: "scene", text: opts.sceneLabel }]);
+      setUi((p) => [...p, { id: Date.now(), who: "scene", text: opts.sceneLabel }]);
     } else if (!opts.silent) {
       silenceRef.current.count = 0;
       secondsSpoken = Math.min(120, Math.round((Date.now() - lastSpokeRef.current) / 1000));
-      setUi((p) => [...p, { who: "u", text: content }]);
+      setUi((p) => [...p, { id: Date.now(), who: "u", text: content }]);
       setWords((w) => w + content.trim().split(/\s+/).filter(Boolean).length);
     }
     setChips([]); setLoading(true);
@@ -903,14 +898,21 @@ export default function App() {
       const roast = stripQ(r.roast_vi);
       const vi = stripQ(r.vi_translation);
 
-      // ẨN câu tiếng anh (en) và tiếng việt dịch (vi) lúc đầu nếu như có tiếng việt sửa lỗi (roast)
+      // Mở F12 để kiểm tra xem Server Backend có thực sự trả về biến roast_vi không nhé
+      console.log("🛠️ TOKI SERVER RESPONSE:", { next_en: en, roast_vi: roast });
+
+      const msgId = Date.now();
+
+      // CƠ CHẾ KHÓA MỤC TIÊU BẰNG ID: Nếu có tiếng Việt sửa lỗi (roast), ép buộc React giấu biến tiếng Anh (hiddenEn) đi
       setUi((p) => [...p, { 
+        id: msgId,
         who: "t", 
         roast, 
         isFix, 
-        en: roast ? "" : en, 
-        vi: roast ? "" : vi, 
-        enc: r.encouragement 
+        en, 
+        vi, 
+        enc: r.encouragement,
+        hiddenEn: !!roast // Chặn đứng việc hiển thị câu tiếng Anh
       }]);
 
       setChips(r.scaffold_chips || []);
@@ -921,21 +923,10 @@ export default function App() {
       if (speakTimeoutRef.current) clearTimeout(speakTimeoutRef.current);
       
       if (roast) {
-        // Trì hoãn 3s đến 6s tùy độ dài câu tiếng Việt để user đọc xong
+        // Cho người dùng từ 3s đến 6s để đọc câu tiếng Việt, sau đó mới bung chữ tiếng Anh ra
         const delayMs = Math.min(Math.max(roast.length * 60, 3000), 6000);
         speakTimeoutRef.current = setTimeout(() => {
-          // Hiện chữ Tiếng Anh
-          setUi((p) => {
-            const newUi = [...p];
-            for (let i = newUi.length - 1; i >= 0; i--) {
-              if (newUi[i].who === "t") {
-                newUi[i] = { ...newUi[i], en, vi };
-                break;
-              }
-            }
-            return newUi;
-          });
-          // Phát âm thanh tiếng Anh
+          setUi((prev) => prev.map(m => m.id === msgId ? { ...m, hiddenEn: false } : m));
           speakEn(en);
         }, delayMs);
       } else {
@@ -944,7 +935,7 @@ export default function App() {
 
     } catch {
       const fbEn = "Hmm, say that again for me?";
-      setUi((p) => [...p, { who: "t", roast: "", en: fbEn, vi: "" }]);
+      setUi((p) => [...p, { id: Date.now(), who: "t", roast: "", en: fbEn, vi: "", hiddenEn: false }]);
       speakEn(fbEn);
     } finally { setLoading(false); lastSpokeRef.current = Date.now(); armSilence(); }
   }, [speakEn, armSilence]);
@@ -987,7 +978,7 @@ export default function App() {
     setLimitHit(false);
     setTopic(tp); setScreen("chat");
     const { opener, openerVi } = pickOpener(tp);
-    setUi([{ who: "t", text: opener, vi: openerVi }]);
+    setUi([{ id: Date.now(), who: "t", text: opener, vi: openerVi }]);
     setChips([]); setErrors([]); setErrorCount(0); setRevealed({}); 
     elapsedRef.current = 0; setElapsed(0); setWords(0);
     setStarters(tp.starters || []); setShowStarters((tp.starters || []).length > 0);
@@ -1328,7 +1319,7 @@ export default function App() {
 
               <div className="feed" ref={feedRef}>
                 {ui.map((m, i) => (
-                  <React.Fragment key="{i}">
+                  <React.Fragment key="{m.id" || i}>
                     {m.who === "scene" ? (
                       <div className="scene-div">{m.text}</div>
                     ) : m.who === "u" ? (
@@ -1339,7 +1330,7 @@ export default function App() {
                       <div className="row t">
                         <div className="bub t">
                           {m.roast && <div className={`roast ${m.isFix ? "fix" : "hype"}`}>{m.roast}</div>}
-                          {(m.en || m.text) && <div className={m.roast ? "enline" : undefined}>{m.en || m.text}</div>}
+                          {(m.en || m.text) && !m.hiddenEn && <div className={m.roast ? "enline" : undefined}>{m.en || m.text}</div>}
                         </div>
                         <div className="mtools">
                           <button className="mtb" onClick={() => speakSeq(m.roast, m.en || m.text)}><Play size="{12}"/> Nghe lại</button>
