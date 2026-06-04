@@ -719,41 +719,8 @@ export default function App() {
     } catch {}
   }, []);
   const chosenVoiceRef = useRef(null);
-  const ttsFailedRef = useRef(false); // once backend TTS is known-unavailable, skip it
+  const ttsFailedRef = useRef(false); // once backend TTS is known-unavailable (501), skip it
   const ttsCacheRef = useRef(new Map()); // sentence -> object URL, to avoid re-spending TTS quota
-  const speakBrowser = useCallback((text) => {
-    if (typeof window === "undefined" || !window.speechSynthesis) return;
-    try {
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = "en-US"; u.rate = slowRef.current ? 0.78 : 0.94; u.pitch = 1.0;
-      const v = chosenVoiceRef.current || pickVoice();
-      if (v) { u.voice = v; u.lang = v.lang; }
-      window.speechSynthesis.speak(u);
-    } catch {}
-  }, []);
-  const speak = useCallback(async (text) => {
-    if (!ttsRef.current || !text) return;
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
-    if (audioRef.current) { try { audioRef.current.pause(); } catch {} }
-    if (!ttsFailedRef.current) {
-      try {
-        const r = await fetch(`${API}/api/tts`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
-        if (r.ok) {
-          const blob = await r.blob();
-          const url = URL.createObjectURL(blob);
-          const a = new Audio(url);
-          a.playbackRate = slowRef.current ? 0.85 : 1;
-          audioRef.current = a;
-          a.onended = () => URL.revokeObjectURL(url);
-          await a.play();
-          return;
-        }
-        ttsFailedRef.current = true; // 501/502 -> stop trying, use browser voice
-      } catch { ttsFailedRef.current = true; }
-    }
-    speakBrowser(text);
-  }, [speakBrowser]);
   // Speak ONLY English. The Vietnamese correction is shown as text, never spoken.
   const speakBrowserEn = useCallback((enText) => {
     if (typeof window === "undefined" || !window.speechSynthesis || !enText) return;
@@ -1118,22 +1085,39 @@ export default function App() {
       rec.ondataavailable = (e) => { if (e.data && e.data.size) chunksRef.current.push(e.data); };
       rec.onstop = async () => {
         cleanupStream();
-        const blob = new Blob(chunksRef.current, { type: rec.mimeType || "audio/webm" });
+        const realMime = rec.mimeType || "audio/mp4";
+        const blob = new Blob(chunksRef.current, { type: realMime });
         chunksRef.current = [];
         if (!blob.size) { setSttBusy(false); setRecording(false); return; }
         setSttBusy(true);
+        const t0 = recordStartRef.current;
         try {
-          const base64 = await blobToWavBase64(blob);
-          const t0 = recordStartRef.current;
-          const text = await apiSTT(base64, "audio/wav; codecs=audio/pcm; samplerate=16000");
-          console.log(`[STT] latency ${Date.now() - t0}ms, text:`, text);
+          let base64, sentType;
+          try {
+            // Preferred: convert to clean 16k WAV in-browser (works on Chrome desktop).
+            base64 = await blobToWavBase64(blob);
+            sentType = "audio/wav; codecs=audio/pcm; samplerate=16000";
+          } catch (convErr) {
+            // iOS Safari often can't decodeAudioData its own recording — send raw,
+            // let the backend handle the container/codec.
+            console.warn("[STT] WAV convert failed, sending raw:", convErr);
+            base64 = await new Promise((resolve, reject) => {
+              const fr = new FileReader();
+              fr.onload = () => resolve(String(fr.result).split(",")[1]);
+              fr.onerror = reject;
+              fr.readAsDataURL(blob);
+            });
+            sentType = realMime;
+          }
+          const text = await apiSTT(base64, sentType);
+          console.log(`[STT] latency ${Date.now() - t0}ms, type ${sentType}, text:`, text);
           if (text) handleSend(text);
           else setMicError("Chưa nghe rõ — thử nói lại gần mic hơn nha.");
         } catch (err) {
           console.error("[STT] error:", err);
           setMicError("Nhận giọng lỗi — thử lại, hoặc gõ chữ bên dưới.");
         } finally {
-          setSttBusy(false);   // ALWAYS clear, so the next press works
+          setSttBusy(false);
           setRecording(false);
         }
       };
