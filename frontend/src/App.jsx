@@ -696,26 +696,36 @@ export default function App() {
     return vs.slice().sort((a, b) => score(b) - score(a))[0] || vs[0];
   };
   const audioRef = useRef(null);
+  const audioElRef = useRef(null); // ONE persistent <audio>, primed inside a user gesture
   const audioUnlockedRef = useRef(false);
-  // Browsers block audio until the user interacts. Call this inside a real click/tap
-  // (e.g. picking a topic) to "unlock" both <audio> playback and speechSynthesis, so
-  // Toki's first line isn't silent in Chrome.
+  // Tiny silent clip used to "unlock" the persistent audio element.
+  const SILENT_MP3 = "data:audio/mp3;base64,SUQzBAAAAAABEVRYWFgAAAAtAAADY29tbWVudABCaWdTb3VuZEJhbmsuY29tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//uQZAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA";
+  // Mobile blocks Audio.play() unless it happens inside a user gesture. We prime ONE
+  // persistent <audio> element here (called from a real tap), then reuse that same
+  // element for Azure playback later — even after the async STT round-trip — so it
+  // doesn't fall back to the browser voice on phones.
   const unlockAudio = useCallback(() => {
+    try {
+      if (!audioElRef.current) {
+        const el = new Audio();
+        el.preload = "auto";
+        audioElRef.current = el;
+      }
+      const el = audioElRef.current;
+      el.src = SILENT_MP3;
+      el.muted = true;
+      const p = el.play();
+      if (p && p.then) p.then(() => { el.muted = false; }).catch(() => { el.muted = false; });
+      else el.muted = false;
+    } catch {}
     if (audioUnlockedRef.current) return;
     audioUnlockedRef.current = true;
     try {
-      // Prime speechSynthesis with an empty utterance.
       if (window.speechSynthesis) {
         const u = new SpeechSynthesisUtterance("");
         u.volume = 0;
         window.speechSynthesis.speak(u);
       }
-    } catch {}
-    try {
-      // Prime the Audio element with a tiny silent clip.
-      const silent = new Audio("data:audio/mp3;base64,SUQzBAAAAAABEVRYWFgAAAAtAAADY29tbWVudABCaWdTb3VuZEJhbmsuY29tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//uQZAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA");
-      silent.volume = 0;
-      silent.play().catch(() => {});
     } catch {}
   }, []);
   const chosenVoiceRef = useRef(null);
@@ -735,16 +745,19 @@ export default function App() {
   const speakEn = useCallback(async (enText) => {
     if (!ttsRef.current || !enText) return;
     if (window.speechSynthesis) window.speechSynthesis.cancel();
-    if (audioRef.current) { try { audioRef.current.pause(); } catch {} }
-    // Reuse cached audio for a sentence we've already fetched (saves Azure quota
-    // on replays / repeated lines).
+    // Use the ONE persistent element that was primed inside a user gesture, so mobile
+    // allows playback even after the async STT round-trip. Create one if missing.
+    if (!audioElRef.current) audioElRef.current = new Audio();
+    const el = audioElRef.current;
+    try { el.pause(); } catch {}
+    el.muted = false;
+    // Play an already-fetched sentence from cache (saves Azure quota on replays).
     const cached = ttsCacheRef.current.get(enText);
     if (cached) {
       try {
-        const a = new Audio(cached);
-        a.playbackRate = slowRef.current ? 0.85 : 1;
-        audioRef.current = a;
-        await a.play();
+        el.src = cached;
+        el.playbackRate = slowRef.current ? 0.85 : 1;
+        await el.play();
         return;
       } catch {}
     }
@@ -759,10 +772,9 @@ export default function App() {
         const blob = await r.blob();
         const url = URL.createObjectURL(blob);
         ttsCacheRef.current.set(enText, url); // keep for replays
-        const a = new Audio(url);
-        a.playbackRate = slowRef.current ? 0.85 : 1;
-        audioRef.current = a;
-        await a.play();
+        el.src = url;
+        el.playbackRate = slowRef.current ? 0.85 : 1;
+        await el.play();
         return true;
       }
       // 501 = backend has no Azure key configured -> give up permanently.
