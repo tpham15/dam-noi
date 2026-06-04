@@ -653,6 +653,8 @@ export default function App() {
   const [showStarters, setShowStarters] = useState(false);
   const [typing, setTyping] = useState(false); // silent-mode text input toggle
   const [limitHit, setLimitHit] = useState(false); // daily free cap reached
+  const limitHitRef = useRef(false);
+  useEffect(() => { limitHitRef.current = limitHit; }, [limitHit]);
   const [account, setAccountState] = useState(() => getAccount()); // {email,name} when logged in
   const [recording, setRecording] = useState(false); // server-STT recording in progress
   const [sttBusy, setSttBusy] = useState(false);      // waiting for transcript
@@ -846,6 +848,7 @@ export default function App() {
   const clearSilence = () => { if (silenceRef.current.timer) clearTimeout(silenceRef.current.timer); };
   const armSilence = useCallback(() => {
     clearSilence();
+    if (limitHitRef.current) return; // no auto-prompts after the daily cap
     if (silenceRef.current.count >= 3) return;
     // Give people room to think. Longer on the first wait, a bit shorter after.
     // Typing takes longer than speaking, so wait generously — even more in typing mode.
@@ -885,7 +888,7 @@ export default function App() {
       const roast = stripQ(r.roast_vi);
       setUi((p) => [...p, { who: "t", roast, isFix, en, vi: stripQ(r.vi_translation), enc: r.encouragement }]);
       setChips(r.scaffold_chips || []);
-      if (r.limitReached) { setLimitHit(true); clearSilence(); }
+      if (r.limitReached) { limitHitRef.current = true; setLimitHit(true); clearSilence(); }
       if (typeof r.streakDays === "number") setStreak(r.streakDays);
       if (r.errorsThisTurn) setErrorCount((c) => c + r.errorsThisTurn);
       // Give the user a moment to read the Vietnamese (roast + translation) BEFORE
@@ -940,7 +943,7 @@ export default function App() {
     if (starting) return;
     unlockAudio(); // this click is a valid user gesture — unlock audio playback now
     setStarting(true);
-    setLimitHit(false);
+    setLimitHit(false); limitHitRef.current = false;
     setTopic(tp); setScreen("chat");
     const { opener, openerVi } = pickOpener(tp);
     setUi([{ who: "t", text: opener, vi: openerVi }]);
@@ -1328,7 +1331,7 @@ export default function App() {
                 </div>
               )}
 
-              {chips.length > 0 && !loading && (
+              {chips.length > 0 && !loading && !limitHit && (
                 <div className="chips">
                   {chips.map((c, i) => <button key={i} className="chip" style={{ animationDelay: `${i * 55}ms` }} onClick={() => handleSend(c)}>{c}</button>)}
                 </div>
