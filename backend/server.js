@@ -8,7 +8,7 @@ const { OAuth2Client } = require("google-auth-library");
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "12mb" }));
 
 // Lightweight wake/health check — no DB, no AI. Used to warm the server up
 // (e.g. an external ping to keep Render awake, and the app pinging on load).
@@ -373,6 +373,49 @@ app.post("/api/tts", async (req, res) => {
   } catch (e) {
     console.error("tts error:", e.message);
     res.status(500).json({ error: "tts failed" });
+  }
+});
+
+// ---- POST /api/stt : speech-to-text via Azure (returns the RAW transcript) ----
+// Body: { audio: <base64>, contentType?: "audio/wav" | "audio/ogg; codecs=opus" }
+// We deliberately want the literal words the user said (including mistakes), so the
+// learner gets corrected on what they ACTUALLY said — unlike on-device STT that
+// silently "fixes" grammar. Keep the audio short (push-to-talk, a few seconds).
+app.post("/api/stt", async (req, res) => {
+  try {
+    if (!AZURE_KEY) return res.status(501).json({ error: "stt not configured" });
+    const { audio, contentType } = req.body || {};
+    if (!audio) return res.status(400).json({ error: "audio required" });
+
+    const buf = Buffer.from(audio, "base64");
+    // Azure short-audio REST endpoint. Content-Type must match what the app records.
+    const ct = contentType || "audio/wav; codecs=audio/pcm; samplerate=16000";
+    const url =
+      `https://${AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1` +
+      `?language=en-US&format=detailed&profanity=raw`;
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Ocp-Apim-Subscription-Key": AZURE_KEY,
+        "Content-Type": ct,
+        Accept: "application/json",
+      },
+      body: buf,
+    });
+    if (!r.ok) {
+      console.error("azure stt error", r.status, await r.text());
+      return res.status(502).json({ error: "stt upstream" });
+    }
+    const data = await r.json();
+    const text =
+      data.DisplayText ||
+      (data.NBest && data.NBest[0] && data.NBest[0].Display) ||
+      "";
+    res.json({ text: text.trim(), status: data.RecognitionStatus || "Unknown" });
+  } catch (e) {
+    console.error("stt error:", e.message);
+    res.status(500).json({ error: "stt failed" });
   }
 });
 
