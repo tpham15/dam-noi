@@ -82,7 +82,7 @@ const TOPICS = [
       { vi: "Nói về khó khăn", scene: "the user describes a blocker or difficulty at work" },
       { vi: "Hỏi đồng nghiệp giúp", scene: "the user asks a coworker for help on a task" },
     ] },
-  { id: "interview", icon: "🎯", vi: "Phỏng vấn", en: "Job interview", desc: "Luyện trả lời tự tin", seed: "[TOPIC: Job interview — a warm, encouraging interviewer]", hue: "#B05B8E",
+  { id: "interview", icon: "🎯", vi: "Phỏng vấn", en: "Job interview", desc: "Luyện trả lời tự tự tin", seed: "[TOPIC: Job interview — a warm, encouraging interviewer]", hue: "#B05B8E",
     openers: [
       ["Hi, thanks for coming in! Make yourself comfortable. So, tell me a little about yourself.", "Chào bạn, cảm ơn đã đến! Cứ thoải mái nhé. Bạn giới thiệu một chút về bản thân nhé?"],
       ["Welcome! Great to meet you. What made you apply for this role?", "Chào mừng bạn! Rất vui được gặp. Điều gì khiến bạn ứng tuyển vị trí này?"],
@@ -267,7 +267,7 @@ const FUN_TOPICS = [
       ["You said five more minutes... an hour ago. We're so late! What happened?", "you bảo năm phút nữa... từ một tiếng trước. Trễ lắm rồi đó! Sao vậy?"],
       ["Hmm, you've been on your phone all dinner. Is something more interesting than me?", "Hừm, cả bữa tối you cứ dán mắt vào điện thoại. Có gì thú vị hơn me à?"],
     ],
-    opener: "If I turned into a caterpillar in the future, would you still keep me as a pet? Or would you throw me away because you're scared of getting itchy?",
+    opener: "If I turned into a caterpillar in the future, would you still keep me as a pet? Or would you throw me away because youre scared of getting itchy?",
     openerVi: "Cưng ơi, Nếu sau này me biến thành một con sâu róm, you có nuôi me tiếp không, hay cưng vứt me đi vì sợ ngứa?",
     starters: [
       { vi: "dán mắt vào điện thoại", scene: "complain about using phone; stay funny" },
@@ -808,17 +808,29 @@ export default function App() {
 
   const speakSeq = useCallback((_viText, enText) => speakEn(enText), [speakEn]);
 
+  // Hủy âm thanh tổng lực
   const stopAllAudio = useCallback(() => {
     speakGenRef.current++; 
-    if (speakTimeoutRef.current) clearTimeout(speakTimeoutRef.current);
+    if (speakTimeoutRef.current) {
+      clearTimeout(speakTimeoutRef.current);
+      speakTimeoutRef.current = null;
+    }
     if (window.speechSynthesis) window.speechSynthesis.cancel();
     if (audioElRef.current) {
       try {
         audioElRef.current.pause();
-        audioElRef.current.currentTime = 0;
+        audioElRef.current.removeAttribute('src'); // Xóa sạch URL cũ để trình duyệt ngưng tải
+        audioElRef.current.load(); // Ép trình duyệt hủy tiến trình phát nhạc
       } catch {}
     }
   }, []);
+
+  // Giám sát màn hình: Nếu không phải màn hình Chat thì hủy tiếng ngay lập tức
+  useEffect(() => {
+    if (screen !== "chat") {
+      stopAllAudio();
+    }
+  }, [screen, stopAllAudio]);
 
   const clearAudioCache = useCallback(() => {
     if (ttsCacheRef.current) {
@@ -889,16 +901,41 @@ export default function App() {
       const en = stripQ(r.next_en);
       const isFix = Number(r.errorsThisTurn || 0) > 0;
       const roast = stripQ(r.roast_vi);
-      setUi((p) => [...p, { who: "t", roast, isFix, en, vi: stripQ(r.vi_translation), enc: r.encouragement }]);
+      const vi = stripQ(r.vi_translation);
+
+      // ẨN câu tiếng anh (en) và tiếng việt dịch (vi) lúc đầu nếu như có tiếng việt sửa lỗi (roast)
+      setUi((p) => [...p, { 
+        who: "t", 
+        roast, 
+        isFix, 
+        en: roast ? "" : en, 
+        vi: roast ? "" : vi, 
+        enc: r.encouragement 
+      }]);
+
       setChips(r.scaffold_chips || []);
       if (r.limitReached) { setLimitHit(true); clearSilence(); }
       if (typeof r.streakDays === "number") setStreak(r.streakDays);
       if (r.errorsThisTurn) setErrorCount((c) => c + r.errorsThisTurn);
       
       if (speakTimeoutRef.current) clearTimeout(speakTimeoutRef.current);
+      
       if (roast) {
-        const delayMs = Math.min(Math.max(roast.length * 45, 2500), 4500);
+        // Trì hoãn 3s đến 6s tùy độ dài câu tiếng Việt để user đọc xong
+        const delayMs = Math.min(Math.max(roast.length * 60, 3000), 6000);
         speakTimeoutRef.current = setTimeout(() => {
+          // Hiện chữ Tiếng Anh
+          setUi((p) => {
+            const newUi = [...p];
+            for (let i = newUi.length - 1; i >= 0; i--) {
+              if (newUi[i].who === "t") {
+                newUi[i] = { ...newUi[i], en, vi };
+                break;
+              }
+            }
+            return newUi;
+          });
+          // Phát âm thanh tiếng Anh
           speakEn(en);
         }, delayMs);
       } else {
