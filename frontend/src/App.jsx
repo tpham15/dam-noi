@@ -696,6 +696,28 @@ export default function App() {
     return vs.slice().sort((a, b) => score(b) - score(a))[0] || vs[0];
   };
   const audioRef = useRef(null);
+  const audioUnlockedRef = useRef(false);
+  // Browsers block audio until the user interacts. Call this inside a real click/tap
+  // (e.g. picking a topic) to "unlock" both <audio> playback and speechSynthesis, so
+  // Toki's first line isn't silent in Chrome.
+  const unlockAudio = useCallback(() => {
+    if (audioUnlockedRef.current) return;
+    audioUnlockedRef.current = true;
+    try {
+      // Prime speechSynthesis with an empty utterance.
+      if (window.speechSynthesis) {
+        const u = new SpeechSynthesisUtterance("");
+        u.volume = 0;
+        window.speechSynthesis.speak(u);
+      }
+    } catch {}
+    try {
+      // Prime the Audio element with a tiny silent clip.
+      const silent = new Audio("data:audio/mp3;base64,SUQzBAAAAAABEVRYWFgAAAAtAAADY29tbWVudABCaWdTb3VuZEJhbmsuY29tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//uQZAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA");
+      silent.volume = 0;
+      silent.play().catch(() => {});
+    } catch {}
+  }, []);
   const chosenVoiceRef = useRef(null);
   const ttsFailedRef = useRef(false); // once backend TTS is known-unavailable, skip it
   const ttsCacheRef = useRef(new Map()); // sentence -> object URL, to avoid re-spending TTS quota
@@ -907,6 +929,7 @@ export default function App() {
 
   const openTopic = async (tp) => {
     if (starting) return;
+    unlockAudio(); // this click is a valid user gesture — unlock audio playback now
     setStarting(true);
     setLimitHit(false);
     setTopic(tp); setScreen("chat");
@@ -1035,14 +1058,58 @@ export default function App() {
     }, 250);
   };
 
+  // Decode any recorded blob and re-encode as 16kHz mono 16-bit WAV, which Azure
+  // STT reliably accepts (webm/opus from the browser is often rejected).
+  const blobToWavBase64 = async (blob) => {
+    const arrayBuf = await blob.arrayBuffer();
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioCtx();
+    const decoded = await ctx.decodeAudioData(arrayBuf);
+    // Downmix to mono and resample to 16kHz via an OfflineAudioContext.
+    const targetRate = 16000;
+    const length = Math.ceil(decoded.duration * targetRate);
+    const off = new OfflineAudioContext(1, length, targetRate);
+    const src = off.createBufferSource();
+    src.buffer = decoded;
+    src.connect(off.destination);
+    src.start(0);
+    const rendered = await off.startRendering();
+    const samples = rendered.getChannelData(0);
+    // Encode WAV (PCM 16-bit).
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+    const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+    writeStr(0, "RIFF"); view.setUint32(4, 36 + samples.length * 2, true); writeStr(8, "WAVE");
+    writeStr(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true); view.setUint32(24, targetRate, true);
+    view.setUint32(28, targetRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    writeStr(36, "data"); view.setUint32(40, samples.length * 2, true);
+    let off2 = 44;
+    for (let i = 0; i < samples.length; i++) {
+      let s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(off2, s < 0 ? s * 0x8000 : s * 0x7fff, true); off2 += 2;
+    }
+    try { ctx.close(); } catch {}
+    // To base64
+    const bytes = new Uint8Array(buffer);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  };
+
   // --- Server-STT mode: record real audio, send to Azure STT for the RAW transcript ---
+  const cleanupStream = () => {
+    try { streamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
+    streamRef.current = null;
+  };
   const startRecord = async () => {
     if (loading || recording || sttBusy) return;
+    unlockAudio();
     setMicError("");
+    cleanupStream(); // make sure any previous stream is fully released first
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
-      // Pick a mime type the browser supports; backend tells Azure the content type.
       const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
         ? "audio/webm;codecs=opus"
         : (MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "");
@@ -1050,44 +1117,44 @@ export default function App() {
       chunksRef.current = [];
       rec.ondataavailable = (e) => { if (e.data && e.data.size) chunksRef.current.push(e.data); };
       rec.onstop = async () => {
-        try { streamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
+        cleanupStream();
         const blob = new Blob(chunksRef.current, { type: rec.mimeType || "audio/webm" });
         chunksRef.current = [];
-        if (!blob.size) { setSttBusy(false); return; }
+        if (!blob.size) { setSttBusy(false); setRecording(false); return; }
         setSttBusy(true);
         try {
-          const base64 = await new Promise((resolve, reject) => {
-            const fr = new FileReader();
-            fr.onload = () => resolve(String(fr.result).split(",")[1]);
-            fr.onerror = reject;
-            fr.readAsDataURL(blob);
-          });
+          const base64 = await blobToWavBase64(blob);
           const t0 = recordStartRef.current;
-          const text = await apiSTT(base64, rec.mimeType || "audio/webm");
-          // Log latency to console so we can measure (one of the 3 things to track).
+          const text = await apiSTT(base64, "audio/wav; codecs=audio/pcm; samplerate=16000");
           console.log(`[STT] latency ${Date.now() - t0}ms, text:`, text);
           if (text) handleSend(text);
           else setMicError("Chưa nghe rõ — thử nói lại gần mic hơn nha.");
-        } catch {
+        } catch (err) {
+          console.error("[STT] error:", err);
           setMicError("Nhận giọng lỗi — thử lại, hoặc gõ chữ bên dưới.");
         } finally {
-          setSttBusy(false);
+          setSttBusy(false);   // ALWAYS clear, so the next press works
+          setRecording(false);
         }
       };
+      rec.onerror = () => { cleanupStream(); setRecording(false); setSttBusy(false); setMicError("Lỗi ghi âm — thử lại nha."); };
       mediaRecRef.current = rec;
       recordStartRef.current = Date.now();
       rec.start();
       setRecording(true);
-    } catch {
-      setMicError("Không truy cập được micro. Cho phép quyền mic, hoặc gõ chữ bên dưới.");
+    } catch (err) {
+      cleanupStream();
+      setRecording(false); setSttBusy(false);
+      console.error("[STT] getUserMedia error:", err);
+      setMicError("Không truy cập được micro. Cho phép quyền mic cho trình duyệt này, hoặc gõ chữ bên dưới.");
     }
   };
 
   const stopRecord = () => {
     if (!recording) return;
-    setRecording(false);
     recordStartRef.current = Date.now(); // start latency clock at release
-    try { mediaRecRef.current?.stop(); } catch {}
+    try { mediaRecRef.current?.stop(); } catch { cleanupStream(); setRecording(false); setSttBusy(false); }
+    // recording flag is cleared in onstop/onerror to avoid races
   };
 
   const mmss = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
