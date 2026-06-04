@@ -196,8 +196,6 @@ const JOBS = [
   { id: "other", icon: "✨", vi: "Khác / Chưa đi làm" },
 ];
 
-// Pick a random opener for a topic. Prefers the openers[] array; falls back to
-// the single opener/openerVi fields if present.
 function pickOpener(tp) {
   if (tp.openers && tp.openers.length) {
     const [opener, openerVi] = tp.openers[Math.floor(Math.random() * tp.openers.length)];
@@ -293,7 +291,8 @@ const FUN_TOPICS = [
 ];
 
 function parseReply(text) {
-  let t = (text || "").trim().replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+  let t = (text || "").trim().replace(/^```(?:json)?/i, "").replace(/
+```$/i, "").trim();
   const s = t.indexOf("{"), e = t.lastIndexOf("}");
   if (s !== -1 && e !== -1) t = t.slice(s, e + 1);
   try {
@@ -309,9 +308,7 @@ function parseReply(text) {
     return { spoken_reply: (text || "Let's keep going! Tell me one small thing about your day.").trim(), vi_translation: "", scaffold_chips: [], errors_noticed: [], encouragement: "" };
   }
 }
-// Backend API base. Local dev: leave VITE_API_BASE unset -> "" -> "/api" goes
-// through the Vite proxy. Production: set VITE_API_BASE to the deployed backend
-// URL (e.g. https://damnoi-backend.onrender.com) so the web app calls it directly.
+
 const API = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
 const DEVICE_KEY = "damnoi_user_id";
 function getUserId() { try { return localStorage.getItem(DEVICE_KEY) || null; } catch { return null; } }
@@ -324,17 +321,15 @@ function getAccount() { try { return JSON.parse(localStorage.getItem(ACCT_KEY) |
 function setAccount(a) { try { a ? localStorage.setItem(ACCT_KEY, JSON.stringify(a)) : localStorage.removeItem(ACCT_KEY); } catch {} }
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
 
-// Send the Google credential to the backend; it returns the account user id.
 async function apiGoogleLogin(credential) {
   const res = await fetch(`${API}/api/auth/google`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ credential, deviceUserId: getUserId() }),
   });
   if (!res.ok) throw new Error("login");
-  return res.json(); // { userId, email, name, streakDays, job }
+  return res.json();
 }
 
-// Load Google Identity Services script once.
 let googleScriptPromise = null;
 function loadGoogleScript() {
   if (googleScriptPromise) return googleScriptPromise;
@@ -358,7 +353,7 @@ async function apiStartSession(topicSeed, greeting) {
   if (!res.ok) throw new Error("start");
   const r = await res.json();
   if (r.userId) setUserId(r.userId);
-  return r; // { userId, sessionId, sessionNumber, streakDays, greeting }
+  return r;
 }
 
 async function apiTurn({ userId, sessionId, text, secondsSpoken = 0, silentCount = 0 }) {
@@ -394,7 +389,6 @@ async function apiVocab(userId) {
   return Array.isArray(r.items) ? r.items : [];
 }
 
-// Send recorded audio (base64) to the backend Azure STT. Returns the raw transcript.
 async function apiSTT(base64, contentType) {
   const res = await fetch(`${API}/api/stt`, {
     method: "POST",
@@ -630,8 +624,8 @@ export default function App() {
   const [topic, setTopic] = useState(null);
   const [ui, setUi] = useState([]);
   const [chips, setChips] = useState([]);
-  const [errors, setErrors] = useState([]); // fetched from /api/review for the drawer
-  const [errorCount, setErrorCount] = useState(0); // live count for the badge
+  const [errors, setErrors] = useState([]); 
+  const [errorCount, setErrorCount] = useState(0); 
   const [loading, setLoading] = useState(false);
   const [input, setInput] = useState("");
   const [ttsOn, setTtsOn] = useState(true);
@@ -644,18 +638,18 @@ export default function App() {
   const [showProgress, setShowProgress] = useState(false);
   const [progress, setProgress] = useState(null);
   const [showBrag, setShowBrag] = useState(false);
-  const [revealed, setRevealed] = useState({}); // msgIndex -> bool
-  const [elapsed, setElapsed] = useState(0);
+  const [revealed, setRevealed] = useState({}); 
+  const [elapsed, setElapsed] = useState(0); // Only updated when saving/finishing to prevent re-renders
   const [words, setWords] = useState(0);
   const [streak, setStreak] = useState(1);
   const [starting, setStarting] = useState(false);
   const [starters, setStarters] = useState([]);
   const [showStarters, setShowStarters] = useState(false);
-  const [typing, setTyping] = useState(false); // silent-mode text input toggle
-  const [limitHit, setLimitHit] = useState(false); // daily free cap reached
-  const [account, setAccountState] = useState(() => getAccount()); // {email,name} when logged in
-  const [recording, setRecording] = useState(false); // server-STT recording in progress
-  const [sttBusy, setSttBusy] = useState(false);      // waiting for transcript
+  const [typing, setTyping] = useState(false); 
+  const [limitHit, setLimitHit] = useState(false); 
+  const [account, setAccountState] = useState(() => getAccount()); 
+  const [recording, setRecording] = useState(false); 
+  const [sttBusy, setSttBusy] = useState(false);      
   const mediaRecRef = useRef(null);
   const chunksRef = useRef([]);
   const streamRef = useRef(null);
@@ -663,8 +657,7 @@ export default function App() {
   const typingRef = useRef(false);
   useEffect(() => { typingRef.current = typing; }, [typing]);
   const sessionRef = useRef({ userId: null, sessionId: null });
-  const lastSpokeRef = useRef(Date.now()); // to measure seconds spoken per turn
-
+  const lastSpokeRef = useRef(Date.now()); 
   const feedRef = useRef(null);
   const silenceRef = useRef({ count: 0, timer: null });
   const recogRef = useRef(null);
@@ -672,6 +665,13 @@ export default function App() {
   useEffect(() => { ttsRef.current = ttsOn; }, [ttsOn]);
   useEffect(() => { slowRef.current = slow; }, [slow]);
 
+  // Ref thay thế bộ đếm re-render
+  const elapsedRef = useRef(0);
+  
+  // Các ref quản lý luồng Voice để chống nhiễu / đè âm thanh
+  const speakGenRef = useRef(0);
+  const speakTimeoutRef = useRef(null);
+  
   const sttSupported = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
   useEffect(() => { if (!sttSupported) setTyping(true); }, [sttSupported]);
 
@@ -682,28 +682,23 @@ export default function App() {
     const score = (v) => {
       const n = (v.name || "").toLowerCase();
       let s = 0;
-      // Highest quality keywords across platforms (Apple/Google/MS neural voices).
       if (/(neural|natural|enhanced|premium|siri)/.test(n)) s += 100;
-      if (/google/.test(n)) s += 60;          // Google voices on Chrome sound good
+      if (/google/.test(n)) s += 60;          
       if (/microsoft/.test(n) && /(aria|jenny|guy|natural)/.test(n)) s += 55;
-      // Known decent named voices.
       if (/(samantha|karen|moira|tessa|serena|allison|ava|zoe|nathan)/.test(n)) s += 30;
-      if (/^en-us/i.test(v.lang)) s += 8;      // prefer US accent slightly
-      if (v.localService) s += 5;              // local = no network lag
-      if (/(compact|eloquence|fred|albert|zarvox|novelty)/.test(n)) s -= 80; // robotic ones
+      if (/^en-us/i.test(v.lang)) s += 8;      
+      if (v.localService) s += 5;              
+      if (/(compact|eloquence|fred|albert|zarvox|novelty)/.test(n)) s -= 80; 
       return s;
     };
     return vs.slice().sort((a, b) => score(b) - score(a))[0] || vs[0];
   };
+
   const audioRef = useRef(null);
-  const audioElRef = useRef(null); // ONE persistent <audio>, primed inside a user gesture
+  const audioElRef = useRef(null); 
   const audioUnlockedRef = useRef(false);
-  // Tiny silent clip used to "unlock" the persistent audio element.
   const SILENT_MP3 = "data:audio/mp3;base64,SUQzBAAAAAABEVRYWFgAAAAtAAADY29tbWVudABCaWdTb3VuZEJhbmsuY29tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//uQZAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA";
-  // Mobile blocks Audio.play() unless it happens inside a user gesture. We prime ONE
-  // persistent <audio> element here (called from a real tap), then reuse that same
-  // element for Azure playback later — even after the async STT round-trip — so it
-  // doesn't fall back to the browser voice on phones.
+  
   const unlockAudio = useCallback(() => {
     try {
       if (!audioElRef.current) {
@@ -728,10 +723,11 @@ export default function App() {
       }
     } catch {}
   }, []);
+
   const chosenVoiceRef = useRef(null);
-  const ttsFailedRef = useRef(false); // once backend TTS is known-unavailable (501), skip it
-  const ttsCacheRef = useRef(new Map()); // sentence -> object URL, to avoid re-spending TTS quota
-  // Speak ONLY English. The Vietnamese correction is shown as text, never spoken.
+  const ttsFailedRef = useRef(false); 
+  const ttsCacheRef = useRef(new Map()); 
+
   const speakBrowserEn = useCallback((enText) => {
     if (typeof window === "undefined" || !window.speechSynthesis || !enText) return;
     try {
@@ -742,18 +738,21 @@ export default function App() {
       window.speechSynthesis.speak(u);
     } catch {}
   }, []);
+
   const speakEn = useCallback(async (enText) => {
     if (!ttsRef.current || !enText) return;
+    
+    const currentGen = ++speakGenRef.current; 
+
     if (window.speechSynthesis) window.speechSynthesis.cancel();
-    // Use the ONE persistent element that was primed inside a user gesture, so mobile
-    // allows playback even after the async STT round-trip. Create one if missing.
     if (!audioElRef.current) audioElRef.current = new Audio();
     const el = audioElRef.current;
-    try { el.pause(); } catch {}
+    try { el.pause(); el.currentTime = 0; } catch {}
     el.muted = false;
-    // Play an already-fetched sentence from cache (saves Azure quota on replays).
+
     const cached = ttsCacheRef.current.get(enText);
     if (cached) {
+      if (currentGen !== speakGenRef.current) return;
       try {
         el.src = cached;
         el.playbackRate = slowRef.current ? 0.85 : 1;
@@ -761,49 +760,81 @@ export default function App() {
         return;
       } catch {}
     }
-    // Fetch from Azure (via backend). Returns true on success.
+
     const tryAzure = async () => {
       const r = await fetch(`${API}/api/tts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: enText }),
       });
+      
+      if (currentGen !== speakGenRef.current) return true; 
+
       if (r.ok) {
         const blob = await r.blob();
+        if (currentGen !== speakGenRef.current) return true; 
         const url = URL.createObjectURL(blob);
-        ttsCacheRef.current.set(enText, url); // keep for replays
+        ttsCacheRef.current.set(enText, url); 
         el.src = url;
         el.playbackRate = slowRef.current ? 0.85 : 1;
         await el.play();
         return true;
       }
-      // 501 = backend has no Azure key configured -> give up permanently.
       if (r.status === 501) ttsFailedRef.current = true;
       return false;
     };
 
-    // Only skip Azure entirely if we've confirmed it's unconfigured (501).
     if (!ttsFailedRef.current) {
       try {
         if (await tryAzure()) return;
-        // A non-501 failure (e.g. backend still waking up, or quota blip): wait a
-        // beat and try ONCE more before falling back, instead of giving up.
-        if (!ttsFailedRef.current) {
+        if (!ttsFailedRef.current && currentGen === speakGenRef.current) {
           await new Promise((res) => setTimeout(res, 1200));
           if (await tryAzure()) return;
         }
       } catch {
-        // Network/transient error: wait and retry once; do NOT disable Azure for
-        // the whole session just because the server was waking up.
-        try {
-          await new Promise((res) => setTimeout(res, 1200));
-          if (await tryAzure()) return;
-        } catch {}
+        if (currentGen === speakGenRef.current) {
+          try {
+            await new Promise((res) => setTimeout(res, 1200));
+            if (await tryAzure()) return;
+          } catch {}
+        }
       }
     }
-    speakBrowserEn(enText); // fallback only after retries
+    
+    if (currentGen === speakGenRef.current) {
+      speakBrowserEn(enText);
+    }
   }, [speakBrowserEn]);
+
   const speakSeq = useCallback((_viText, enText) => speakEn(enText), [speakEn]);
+
+  const stopAllAudio = useCallback(() => {
+    speakGenRef.current++; 
+    if (speakTimeoutRef.current) clearTimeout(speakTimeoutRef.current);
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    if (audioElRef.current) {
+      try {
+        audioElRef.current.pause();
+        audioElRef.current.currentTime = 0;
+      } catch {}
+    }
+  }, []);
+
+  const clearAudioCache = useCallback(() => {
+    if (ttsCacheRef.current) {
+      ttsCacheRef.current.forEach((url) => {
+        URL.revokeObjectURL(url);
+      });
+      ttsCacheRef.current.clear();
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      clearAudioCache();
+      stopAllAudio();
+    };
+  }, [clearAudioCache, stopAllAudio]);
 
   useEffect(() => { if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight; }, [ui, chips, loading]);
   useEffect(() => {
@@ -813,19 +844,20 @@ export default function App() {
     window.speechSynthesis.addEventListener?.("voiceschanged", warm);
     return () => window.speechSynthesis.removeEventListener?.("voiceschanged", warm);
   }, []);
-  // Wake the backend as soon as the app opens, so it's up by the time the user
-  // reaches the chat and needs the Azure voice (Render free sleeps when idle).
   useEffect(() => {
     fetch(`${API}/api/health`).catch(() => {});
   }, []);
-  useEffect(() => { if (screen !== "chat") return; const id = setInterval(() => setElapsed((e) => e + 1), 1000); return () => clearInterval(id); }, [screen]);
+  
+  useEffect(() => {
+    if (screen !== "chat") return;
+    const id = setInterval(() => { elapsedRef.current += 1; }, 1000);
+    return () => clearInterval(id);
+  }, [screen]);
 
   const clearSilence = () => { if (silenceRef.current.timer) clearTimeout(silenceRef.current.timer); };
   const armSilence = useCallback(() => {
     clearSilence();
     if (silenceRef.current.count >= 3) return;
-    // Give people room to think. Longer on the first wait, a bit shorter after.
-    // Typing takes longer than speaking, so wait generously — even more in typing mode.
     const base = typingRef.current ? 90000 : 55000;
     const waitMs = silenceRef.current.count === 0 ? base : Math.round(base * 0.75);
     silenceRef.current.timer = setTimeout(() => { silenceRef.current.count += 1; sendTurn(`[USER_SILENT count=${silenceRef.current.count}]`, { silent: true }); }, waitMs);
@@ -855,8 +887,6 @@ export default function App() {
       });
       const stripQ = (s) => String(s || "").trim().replace(/^["'“”]+|["'“”]+$/g, "").trim();
       const en = stripQ(r.next_en);
-      // roast_vi is ALWAYS shown now: a Gen-Z hype line when correct, a tease+fix
-      // when there's an error. isFix flags a real correction (for stronger styling).
       const isFix = Number(r.errorsThisTurn || 0) > 0;
       const roast = stripQ(r.roast_vi);
       setUi((p) => [...p, { who: "t", roast, isFix, en, vi: stripQ(r.vi_translation), enc: r.encouragement }]);
@@ -864,7 +894,17 @@ export default function App() {
       if (r.limitReached) { setLimitHit(true); clearSilence(); }
       if (typeof r.streakDays === "number") setStreak(r.streakDays);
       if (r.errorsThisTurn) setErrorCount((c) => c + r.errorsThisTurn);
-      speakEn(en); // only English is ever spoken
+      
+      if (speakTimeoutRef.current) clearTimeout(speakTimeoutRef.current);
+      if (roast) {
+        const delayMs = Math.min(Math.max(roast.length * 45, 2500), 4500);
+        speakTimeoutRef.current = setTimeout(() => {
+          speakEn(en);
+        }, delayMs);
+      } else {
+        speakEn(en);
+      }
+
     } catch {
       const fbEn = "Hmm, say that again for me?";
       setUi((p) => [...p, { who: "t", roast: "", en: fbEn, vi: "" }]);
@@ -872,10 +912,9 @@ export default function App() {
     } finally { setLoading(false); lastSpokeRef.current = Date.now(); armSilence(); }
   }, [speakEn, armSilence]);
 
-  const handleSend = (text) => { const t = (text != null ? text : input).trim(); if (!t || loading) return; setInput(""); sendTurn(t); };
+  const handleSend = (text) => { const t = (text != null ? text : input).trim(); if (!t || loading) return; setInput(""); clearSilence(); sendTurn(t); };
   const startScene = (s) => { if (loading) return; sendTurn(`[SCENE: ${s.scene}]`, { scene: true, sceneLabel: s.vi }); };
 
-  // Called by Google with the signed credential after the user picks an account.
   const handleCredential = useCallback(async (response) => {
     try {
       const r = await apiGoogleLogin(response.credential);
@@ -893,7 +932,6 @@ export default function App() {
     try {
       await loadGoogleScript();
       window.google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleCredential });
-      // Use the One Tap / prompt flow for a one-tap experience.
       window.google.accounts.id.prompt();
     } catch {
       alert("Không tải được Google. Kiểm tra mạng nha.");
@@ -903,18 +941,18 @@ export default function App() {
   const doLogout = useCallback(() => {
     setAccount(null); setAccountState(null);
     try { window.google?.accounts?.id?.disableAutoSelect?.(); } catch {}
-    // Keep using the same userId locally; data stays under the account on the server.
   }, []);
 
   const openTopic = async (tp) => {
     if (starting) return;
-    unlockAudio(); // this click is a valid user gesture — unlock audio playback now
+    unlockAudio(); 
     setStarting(true);
     setLimitHit(false);
     setTopic(tp); setScreen("chat");
     const { opener, openerVi } = pickOpener(tp);
     setUi([{ who: "t", text: opener, vi: openerVi }]);
-    setChips([]); setErrors([]); setErrorCount(0); setRevealed({}); setElapsed(0); setWords(0);
+    setChips([]); setErrors([]); setErrorCount(0); setRevealed({}); 
+    elapsedRef.current = 0; setElapsed(0); setWords(0);
     setStarters(tp.starters || []); setShowStarters((tp.starters || []).length > 0);
     silenceRef.current.count = 0;
     lastSpokeRef.current = Date.now();
@@ -923,8 +961,6 @@ export default function App() {
       sessionRef.current = { userId: s.userId, sessionId: s.sessionId };
       if (typeof s.streakDays === "number") setStreak(s.streakDays);
     } catch {
-      // If the backend is unreachable, the chat screen still shows but turns will
-      // fail gracefully into the fallback line. Surface a gentle hint.
       setMicError("Chưa kết nối được máy chủ. Kiểm tra server backend có đang chạy không.");
     } finally { setStarting(false); }
     setTimeout(() => speakEn(opener), 380); armSilence();
@@ -959,12 +995,13 @@ export default function App() {
   };
 
   const copyBrag = () => {
-    const cap = `Mình vừa "dám nói" tiếng Anh ${mmss} phút với Toki 🔥 ${errorCount} lần bị khịa sấp mặt mà vẫn sống 😎 Thử đi: Dám Nói app #DamNoi #hoctienganh`;
+    const mmssLocal = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
+    const cap = `Mình vừa "dám nói" tiếng Anh ${mmssLocal} phút với Toki 🔥 ${errorCount} lần bị khịa sấp mặt mà vẫn sống 😎 Thử đi: Dám Nói app #DamNoi #hoctienganh`;
     try { navigator.clipboard.writeText(cap); } catch {}
   };
 
-  const leave = () => { clearSilence(); if (window.speechSynthesis) window.speechSynthesis.cancel(); setScreen("home"); };
-  const finish = () => { clearSilence(); if (window.speechSynthesis) window.speechSynthesis.cancel(); setListening(false); setScreen("finish"); };
+  const leave = () => { clearSilence(); stopAllAudio(); clearAudioCache(); setScreen("home"); };
+  const finish = () => { clearSilence(); stopAllAudio(); clearAudioCache(); setListening(false); setElapsed(elapsedRef.current); setScreen("finish"); };
 
   const micErrMsg = (code) => ({
     "not-allowed": "Micro bị chặn. Mở System Settings › Privacy & Security › Microphone, bật cho Chrome, rồi tải lại trang.",
@@ -989,8 +1026,8 @@ export default function App() {
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       const rec = new SR();
       rec.lang = "en-US";
-      rec.continuous = true;       // don't auto-stop on a pause
-      rec.interimResults = true;   // keep capturing while held
+      rec.continuous = true;       
+      rec.interimResults = true;   
       rec.maxAlternatives = 1;
       interimRef.current = "";
       rec.onstart = () => setListening(true);
@@ -1001,20 +1038,14 @@ export default function App() {
           if (e.results[i].isFinal) finalText += t + " ";
           else interimText += t + " ";
         }
-        // Browsers (esp. Chrome/Google) auto-"fix" grammar & punctuation in the
-        // FINAL result — e.g. "it not good" becomes "It's not good" — which hides
-        // the learner's real mistake. The INTERIM text is closer to what was
-        // actually said, so we keep the latest interim as the raw fallback.
         if (interimText.trim()) interimRef.current = interimText.trim();
         if (finalText.trim()) transcriptRef.current = finalText.trim();
       };
       rec.onerror = (e) => {
-        // While held, ignore the harmless "no-speech"/"aborted" so it doesn't cut off.
         if (holdingRef.current && (e.error === "no-speech" || e.error === "aborted")) return;
         setListening(false); setMicError(micErrMsg(e.error));
       };
       rec.onend = () => {
-        // If still held (browser auto-ended anyway), restart to keep listening.
         if (holdingRef.current) { try { rec.start(); } catch {} return; }
         setListening(false);
       };
@@ -1027,24 +1058,18 @@ export default function App() {
     holdingRef.current = false;
     setListening(false);
     try { recogRef.current?.stop(); } catch {}
-    // small delay so the last result lands before we read it
     setTimeout(() => {
-      // Prefer the RAW interim text (less auto-corrected by the browser). Fall back
-      // to the final only if interim is empty. This keeps the learner's real words.
       const raw = (interimRef.current || transcriptRef.current || "").trim();
       transcriptRef.current = ""; interimRef.current = "";
       if (raw) handleSend(raw);
     }, 250);
   };
 
-  // Decode any recorded blob and re-encode as 16kHz mono 16-bit WAV, which Azure
-  // STT reliably accepts (webm/opus from the browser is often rejected).
   const blobToWavBase64 = async (blob) => {
     const arrayBuf = await blob.arrayBuffer();
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     const ctx = new AudioCtx();
     const decoded = await ctx.decodeAudioData(arrayBuf);
-    // Downmix to mono and resample to 16kHz via an OfflineAudioContext.
     const targetRate = 16000;
     const length = Math.ceil(decoded.duration * targetRate);
     const off = new OfflineAudioContext(1, length, targetRate);
@@ -1054,7 +1079,6 @@ export default function App() {
     src.start(0);
     const rendered = await off.startRendering();
     const samples = rendered.getChannelData(0);
-    // Encode WAV (PCM 16-bit).
     const buffer = new ArrayBuffer(44 + samples.length * 2);
     const view = new DataView(buffer);
     const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
@@ -1069,14 +1093,12 @@ export default function App() {
       view.setInt16(off2, s < 0 ? s * 0x8000 : s * 0x7fff, true); off2 += 2;
     }
     try { ctx.close(); } catch {}
-    // To base64
     const bytes = new Uint8Array(buffer);
     let bin = "";
     for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
     return btoa(bin);
   };
 
-  // --- Server-STT mode: record real audio, send to Azure STT for the RAW transcript ---
   const cleanupStream = () => {
     try { streamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
     streamRef.current = null;
@@ -1085,7 +1107,7 @@ export default function App() {
     if (loading || recording || sttBusy) return;
     unlockAudio();
     setMicError("");
-    cleanupStream(); // make sure any previous stream is fully released first
+    cleanupStream(); 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
@@ -1106,12 +1128,9 @@ export default function App() {
         try {
           let base64, sentType;
           try {
-            // Preferred: convert to clean 16k WAV in-browser (works on Chrome desktop).
             base64 = await blobToWavBase64(blob);
             sentType = "audio/wav; codecs=audio/pcm; samplerate=16000";
           } catch (convErr) {
-            // iOS Safari often can't decodeAudioData its own recording — send raw,
-            // let the backend handle the container/codec.
             console.warn("[STT] WAV convert failed, sending raw:", convErr);
             base64 = await new Promise((resolve, reject) => {
               const fr = new FileReader();
@@ -1148,9 +1167,19 @@ export default function App() {
 
   const stopRecord = () => {
     if (!recording) return;
-    recordStartRef.current = Date.now(); // start latency clock at release
+    recordStartRef.current = Date.now(); 
     try { mediaRecRef.current?.stop(); } catch { cleanupStream(); setRecording(false); setSttBusy(false); }
-    // recording flag is cleared in onstop/onerror to avoid races
+  };
+
+  const handleMicStart = (e) => {
+    e.preventDefault();
+    clearSilence();
+    startRecord();
+  };
+
+  const handleMicEnd = (e) => {
+    e.preventDefault();
+    stopRecord();
   };
 
   const mmss = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
@@ -1165,7 +1194,7 @@ export default function App() {
 
           {screen === "welcome" && (
             <div className="welcome">
-              <Toki size="lg" />
+              <Toki size="lg"/>
               <h1 className="disp">MoHo AI</h1>
               <p className="tag">Dare to speak</p>
               <p className="promise disp">"Cứ nói đại.<br/>Đừng sợ sai."</p>
@@ -1176,7 +1205,7 @@ export default function App() {
 
           {screen === "job" && (
             <div className="welcome">
-              <Toki size="md" />
+              <Toki size="md"/>
               <h1 className="disp" style={{ fontSize: 30 }}>Bạn là ai nào?</h1>
               <p className="tag">Để Toki khịa cho đúng "gu" ngành của bạn 😎</p>
               <div className="jobgrid">
@@ -1197,16 +1226,15 @@ export default function App() {
                 <div className="hi">Hôm nay muốn nói gì nào?</div>
                 <h2 className="disp">Chào {account?.name ? account.name.split(" ").slice(-1)[0] : "ní"} 👋</h2>
                 <div className="streakbar">
-                  <button className="pill fire tap" onClick={openProgress}><Flame size={15} /> {streak} ngày</button>
-                  <button className="pill book tap" onClick={openVocab}><BookOpen size={15} /> Sổ từ vựng</button>
-                  <button className="pill min tap" onClick={openProgress}><TrendingUp size={15} /> Hành trình</button>
+                  <button className="pill fire tap" onClick={openProgress}><Flame size="{15}"/> {streak} ngày</button>
+                  <button className="pill book tap" onClick={openVocab}><BookOpen size="{15}"/> Sổ từ vựng</button>
+                  <button className="pill min tap" onClick={openProgress}><TrendingUp size="{15}"/> Hành trình</button>
                   {account
                     ? <button className="pill min tap" onClick={doLogout} title={account.email}>Đăng xuất</button>
                     : <button className="pill save tap" onClick={doLogin}>🔒 Lưu tiến trình</button>}
                 </div>
               </div>
 
-              {/* Hot card: Bị Toki khịa — full width, bốc lửa */}
               {roastTopic && (
                 <div className="hotwrap">
                   <button className="hotcard" onClick={() => openTopic(roastTopic)}>
@@ -1216,7 +1244,7 @@ export default function App() {
                       <div className="hotvi">{roastTopic.vi}</div>
                       <div className="hoten">{roastTopic.en} · {roastTopic.desc}</div>
                     </div>
-                    <Flame size={20} className="hotflame" />
+                    <Flame size="{20}" className="hotflame"/>
                   </button>
                 </div>
               )}
@@ -1226,7 +1254,7 @@ export default function App() {
                 {TOPICS.map((tp, i) => (
                   <button key={tp.id} className={`tcard ${tp.id === "free" ? "free" : ""}`} style={{ animationDelay: `${i * 40}ms` }} onClick={() => openTopic(tp)}>
                     <div className="ic" style={{ background: tp.id === "free" ? undefined : `${tp.hue}26`, color: tp.hue }}>
-                      {tp.icon === "rabbit" ? <Rabbit size={22} color="#fff" /> : tp.icon}
+                      {tp.icon === "rabbit" ? <Rabbit size="{22}" color="#fff"/> : tp.icon}
                     </div>
                     <div className="vi">{tp.vi}</div>
                     <div className="en">{tp.en}</div>
@@ -1247,23 +1275,23 @@ export default function App() {
           {screen === "chat" && (
             <>
               <div className="chat-h">
-                <button className="backb" onClick={leave}><ChevronLeft size={24} /></button>
-                <Toki size="sm" />
+                <button className="backb" onClick={leave}><ChevronLeft size="{24}"/></button>
+                <Toki size="sm"/>
                 <div>
                   <div className="name">Toki</div>
                   <div className="sub">{loading ? "đang nghe…" : topic?.vi}</div>
                 </div>
                 <div className="tools">
-                  <button className={`tbtn ${slow ? "act" : ""}`} title="Nói chậm lại" onClick={() => setSlow((v) => !v)}><Rabbit size={19} /></button>
-                  <button className="tbtn" title="Bật/tắt giọng" onClick={() => { setTtsOn((v) => !v); if (window.speechSynthesis) window.speechSynthesis.cancel(); }}>{ttsOn ? <Volume2 size={19} /> : <VolumeX size={19} />}</button>
-                  <button className="tbtn rev" title="Xem lại" onClick={openReview}><Sparkles size={19} />{errorCount > 0 && <span className="badge">{errorCount}</span>}</button>
+                  <button className={`tbtn ${slow ? "act" : ""}`} title="Nói chậm lại" onClick={() => setSlow((v) => !v)}><Rabbit size="{19}"/></button>
+                  <button className="tbtn" title="Bật/tắt giọng" onClick={() => { setTtsOn((v) => !v); if (window.speechSynthesis) window.speechSynthesis.cancel(); }}>{ttsOn ? <Volume2 size="{19}"/> : <VolumeX size="{19}"/>}</button>
+                  <button className="tbtn rev" title="Xem lại" onClick={openReview}><Sparkles size="{19}"/>{errorCount > 0 && <span className="badge">{errorCount}</span>}</button>
                   <button className="finb" onClick={finish}>Xong</button>
                 </div>
               </div>
 
               <div className="feed" ref={feedRef}>
                 {ui.map((m, i) => (
-                  <React.Fragment key={i}>
+                  <React.Fragment key="{i}">
                     {m.who === "scene" ? (
                       <div className="scene-div">{m.text}</div>
                     ) : m.who === "u" ? (
@@ -1277,13 +1305,13 @@ export default function App() {
                           {(m.en || m.text) && <div className={m.roast ? "enline" : undefined}>{m.en || m.text}</div>}
                         </div>
                         <div className="mtools">
-                          <button className="mtb" onClick={() => speakSeq(m.roast, m.en || m.text)}><Play size={12} /> Nghe lại</button>
-                          {m.vi && <button className={`mtb ${revealed[i] ? "on" : ""}`} onClick={() => setRevealed((r) => ({ ...r, [i]: !r[i] }))}><Languages size={12} /> {revealed[i] ? "Ẩn" : "Dịch"}</button>}
+                          <button className="mtb" onClick={() => speakSeq(m.roast, m.en || m.text)}><Play size="{12}"/> Nghe lại</button>
+                          {m.vi && <button className={`mtb ${revealed[i] ? "on" : ""}`} onClick={() => setRevealed((r) => ({ ...r, [i]: !r[i] }))}><Languages size="{12}"/> {revealed[i] ? "Ẩn" : "Dịch"}</button>}
                         </div>
                         {revealed[i] && m.vi && <div className="vihint">{m.vi}</div>}
                       </div>
                     )}
-                    {m.enc && <div className="enc"><Sparkles size={13} /> {m.enc}</div>}
+                    {m.enc && <div className="enc"><Sparkles size="{13}"/> {m.enc}</div>}
                   </React.Fragment>
                 ))}
                 {loading && <div className="row t"><div className="dots"><span /><span /><span /></div></div>}
@@ -1314,20 +1342,22 @@ export default function App() {
                   <>
                     <div className="microw">
                       <button className="kbtoggle" title="Gõ chữ (chế độ im lặng)" onClick={() => setTyping(true)}>
-                        <Keyboard size={20} />
+                        <Keyboard size="{20}"/>
                       </button>
                       <button
                         className={`bigmic ${recording ? "on" : ""}`}
                         disabled={loading || sttBusy}
                         title="Ấn giữ để nói (nhận giọng qua server)"
-                        onMouseDown={startRecord}
-                        onMouseUp={stopRecord}
-                        onMouseLeave={() => { if (recording) stopRecord(); }}
-                        onTouchStart={(e) => { e.preventDefault(); startRecord(); }}
-                        onTouchEnd={(e) => { e.preventDefault(); stopRecord(); }}
+                        style={{ touchAction: "none", userSelect: "none", WebkitUserSelect: "none" }}
+                        onMouseDown={handleMicStart}
+                        onMouseUp={handleMicEnd}
+                        onMouseLeave={handleMicEnd}
+                        onTouchStart={handleMicStart}
+                        onTouchEnd={handleMicEnd}
+                        onTouchCancel={handleMicEnd}
                         onContextMenu={(e) => e.preventDefault()}
                       >
-                        <Mic size={30} />
+                        <Mic size="{30}"/>
                       </button>
                       <div className="kbspacer" />
                     </div>
@@ -1335,11 +1365,11 @@ export default function App() {
                   </>
                 ) : (
                   <div className="typewrap">
-                    <button className="kbback" title="Quay lại nói" onClick={() => setTyping(false)}><Mic size={18} /></button>
+                    <button className="kbback" title="Quay lại nói" onClick={() => setTyping(false)}><Mic size="{18}"/></button>
                     <input className="txt" value={input} autoFocus
                       placeholder="Đang ở chỗ đông người? Gõ vào đây…"
                       onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") handleSend(); }} />
-                    <button className="sendb" disabled={loading || !input.trim()} onClick={() => handleSend()}><Send size={17} /></button>
+                    <button className="sendb" disabled={loading || !input.trim()} onClick={() => handleSend()}><Send size="{17}"/></button>
                   </div>
                 )}
               </div>
@@ -1356,7 +1386,7 @@ export default function App() {
                   animationDelay: `${(i % 7) * 0.25}s`,
                 }} />
               ))}
-              <Toki size="lg" />
+              <Toki size="lg"/>
               <div className="pop">Bạn vừa làm được</div>
               <h2 className="disp">Tuyệt vời! 🎉</h2>
               <p className="sub">Bạn vừa nói tiếng Anh về cuộc sống thật của mình — phần khó nhất, và bạn đã làm được.</p>
@@ -1365,11 +1395,11 @@ export default function App() {
                 <div className="stat c"><div className="n">{words}</div><div className="l">Từ đã nói</div></div>
                 <div className="stat s"><div className="n">{errorCount}</div><div className="l">Cách nói mới</div></div>
               </div>
-              <div className="streakbig"><Flame size={18} /> {streak} ngày liên tiếp — giữ lửa nhé!</div>
+              <div className="streakbig"><Flame size="{18}"/> {streak} ngày liên tiếp — giữ lửa nhé!</div>
               <p className="praise disp">"Mỗi lần bạn dám mở miệng là một lần can đảm. Hẹn mai gặp lại?"</p>
               <div className="finbtns">
                 <button className="pri" onClick={() => { setScreen("home"); }}>Hẹn mai gặp lại 🔥</button>
-                <button className="share" onClick={openBrag}><Sparkles size={16} /> Khoe sổ phốt</button>
+                <button className="share" onClick={openBrag}><Sparkles size="{16}"/> Khoe sổ phốt</button>
                 <button className="sec" onClick={() => { setScreen("chat"); armSilence(); }}>Nói thêm chút nữa</button>
                 {errorCount > 0 && <button className="sec" onClick={openReview}>Xem lại {errorCount} cách nói mới</button>}
               </div>
@@ -1379,8 +1409,8 @@ export default function App() {
           {showReview && (
             <div className="drawer" onClick={() => setShowReview(false)}>
               <div className="sheet" onClick={(e) => e.stopPropagation()}>
-                <button className="closeb" onClick={() => setShowReview(false)}><X size={18} /></button>
-                <h3 className="disp"><Sparkles size={20} color="#FF5E3A" /> Xem lại nhẹ nhàng</h3>
+                <button className="closeb" onClick={() => setShowReview(false)}><X size="{18}"/></button>
+                <h3 className="disp"><Sparkles size="{20}" color="#FF5E3A"/> Xem lại nhẹ nhàng</h3>
                 <p className="lead">Bạn đã nói rất tốt. Đây là vài cách nói còn tự nhiên hơn — chỉ để tham khảo thôi nhé, không phải lỗi.</p>
                 {errors.length === 0 ? (
                   <div className="empty">Chưa có gì để xem lại.<br/>Cứ thoải mái nói tiếp đi nhé!</div>
@@ -1394,8 +1424,8 @@ export default function App() {
           {showVocab && (
             <div className="drawer" onClick={() => setShowVocab(false)}>
               <div className="sheet" onClick={(e) => e.stopPropagation()}>
-                <button className="closeb" onClick={() => setShowVocab(false)}><X size={18} /></button>
-                <h3 className="disp"><BookOpen size={20} color="#FF5E3A" /> Sổ từ vựng</h3>
+                <button className="closeb" onClick={() => setShowVocab(false)}><X size="{18}"/></button>
+                <h3 className="disp"><BookOpen size="{20}" color="#FF5E3A"/> Sổ từ vựng</h3>
                 <p className="lead">Những từ và cụm Toki nhặt ra trong lúc bạn nói. Học lại bất cứ lúc nào.</p>
                 {vocabItems.length === 0 ? (
                   <div className="empty">Sổ từ vựng còn trống.<br/>Nói chuyện với Toki để gom từ mới nhé!</div>
@@ -1414,8 +1444,8 @@ export default function App() {
           {showProgress && (
             <div className="drawer" onClick={() => setShowProgress(false)}>
               <div className="sheet" onClick={(e) => e.stopPropagation()}>
-                <button className="closeb" onClick={() => setShowProgress(false)}><X size={18} /></button>
-                <h3 className="disp"><TrendingUp size={20} color="#FF5E3A" /> Hành trình của bạn</h3>
+                <button className="closeb" onClick={() => setShowProgress(false)}><X size="{18}"/></button>
+                <h3 className="disp"><TrendingUp size="{20}" color="#FF5E3A"/> Hành trình của bạn</h3>
                 <p className="lead">Mỗi lần bạn dám mở miệng đều được tính. Đây là chặng đường tới giờ.</p>
                 {!progress ? (
                   <div className="empty">Chưa có dữ liệu.<br/>Nói buổi đầu tiên để bắt đầu hành trình nhé!</div>
@@ -1436,12 +1466,12 @@ export default function App() {
           {showBrag && (
             <div className="drawer" onClick={() => setShowBrag(false)}>
               <div className="sheet" onClick={(e) => e.stopPropagation()}>
-                <button className="closeb" onClick={() => setShowBrag(false)}><X size={18} /></button>
-                <h3 className="disp"><Sparkles size={20} color="#FF6B45" /> Sổ phốt của bạn</h3>
+                <button className="closeb" onClick={() => setShowBrag(false)}><X size="{18}"/></button>
+                <h3 className="disp"><Sparkles size="{20}" color="#FF6B45"/> Sổ phốt của bạn</h3>
                 <p className="lead">Chụp màn hình tấm thẻ này rồi flex lên TikTok / Story nhé! 😎</p>
                 <div className="bragcard">
                   <div className="bragtop">
-                    <Toki size="sm" />
+                    <Toki size="sm"/>
                     <div>
                       <div className="bragname">Sổ phốt tiếng Anh</div>
                       <div className="bragsub">by MoHo AI 🔥</div>
