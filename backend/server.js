@@ -43,19 +43,10 @@ const TOKI_TOOL = {
     additionalProperties: false,
     required: ["roast_vi", "teach_en", "next_en", "vi_translation", "scaffold_chips", "errors_noticed", "used_vietnamese", "encouragement", "vocab"],
     properties: {
-      roast_vi: { 
-        type: "string", 
-        description: "BẮT BUỘC: Một câu ngắn gọn bằng TIẾNG VIỆT để nhận xét, khịa hoặc sửa lỗi người dùng. Bắt buộc phải là Tiếng Việt." 
-      },
+      roast_vi: { type: "string" },
       teach_en: { type: "string" },
-      next_en: { 
-        type: "string", 
-        description: "BẮT BUỘC: Câu trả lời chính của Toki để duy trì hội thoại. CHỈ ĐƯỢC VIẾT BẰNG TIẾNG ANH, không được có tiếng Việt." 
-      },
-      vi_translation: { 
-        type: "string",
-        description: "Bản dịch Tiếng Việt của câu next_en."
-      },
+      next_en: { type: "string" },
+      vi_translation: { type: "string" },
       scaffold_chips: { type: "array", items: { type: "string" } },
       errors_noticed: {
         type: "array",
@@ -91,11 +82,17 @@ const TOKI_TOOL = {
 };
 
 // Cap conversation length to keep input-token cost low on long sessions.
-const MAX_RECENT = parseInt(process.env.TOKI_MAX_RECENT || "16", 10); 
+// Always keep the first turn (the [SESSION_START] anchor that holds the topic/role),
+// then keep only the most recent MAX_RECENT turns. The system prompt is separate
+// and never trimmed.
+const MAX_RECENT = parseInt(process.env.TOKI_MAX_RECENT || "16", 10); // ~8 back-and-forth exchanges
 function trimHistory(messages) {
   if (!Array.isArray(messages) || messages.length <= MAX_RECENT + 1) return messages;
-  const anchor = messages[0];                 
-  const recent = messages.slice(-MAX_RECENT);  
+  const anchor = messages[0];                 // [SESSION_START] ... keeps topic/role context
+  const recent = messages.slice(-MAX_RECENT);  // most recent turns
+  // Anthropic requires the first message to be role 'user'. The anchor is a user
+  // turn, so prepend it; if the recent slice happens to start with an assistant
+  // turn, the leading user anchor still satisfies the constraint.
   return [anchor, ...recent];
 }
 
@@ -139,12 +136,16 @@ function countWords(s) {
   return (s || "").trim().split(/\s+/).filter(Boolean).length;
 }
 
+// ---- POST /api/session/start : create or resume a user, open a session ----
+// ---- POST /api/auth/google : verify a Google ID token, return the account ----
+// Body: { credential: <google ID token>, deviceUserId?: <current guest id> }
 app.post("/api/auth/google", async (req, res) => {
   try {
     if (!GOOGLE_CLIENT_ID) return res.status(501).json({ error: "login not configured" });
     const { credential, deviceUserId } = req.body || {};
     if (!credential) return res.status(400).json({ error: "credential required" });
 
+    // Verify the token really came from Google and was issued for our app.
     const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: GOOGLE_CLIENT_ID });
     const payload = ticket.getPayload();
     if (!payload || !payload.email || !payload.email_verified) {
@@ -171,6 +172,7 @@ app.post("/api/session/start", async (req, res) => {
     const s = await db.startSession(userId);
     if (job) { try { await db.setJob(s.userId, job); } catch {} }
     const opener = greeting || OPENING;
+    // seed the session anchor (topic/role) + opening greeting into history
     const anchor = topicSeed
       ? `[SESSION_START] ${topicSeed} session_number=${s.sessionNumber} confidence=${s.confidenceLevel}`
       : `[SESSION_START] session_number=${s.sessionNumber} confidence=${s.confidenceLevel}`;
@@ -188,6 +190,8 @@ app.post("/api/session/start", async (req, res) => {
   }
 });
 
+// ---- POST /api/turn : one conversational turn ----
+// body: { userId, sessionId, text, secondsSpoken?, silentCount? }
 app.post("/api/turn", async (req, res) => {
   try {
     const { userId, sessionId, text, secondsSpoken = 0, silentCount = 0 } = req.body || {};
@@ -195,6 +199,7 @@ app.post("/api/turn", async (req, res) => {
     const user = await db.getUser(userId);
     if (!session || !user) return res.status(404).json({ error: "unknown session/user" });
 
+    // Daily free cap: stop before any AI call once the user hits the limit.
     const DAILY_LIMIT = Number(process.env.DAILY_TURN_LIMIT || 40);
     if (silentCount === 0 && (await db.getUserTurnsToday(userId)) >= DAILY_LIMIT) {
       return res.json({
@@ -212,9 +217,11 @@ app.post("/api/turn", async (req, res) => {
       });
     }
 
+    // Build the user turn content. A silence signal replaces normal text.
     const content = silentCount > 0 ? `[USER_SILENT count=${silentCount}]` : (text || "").trim();
     if (!content) return res.status(400).json({ error: "empty turn" });
 
+    // Persist the user turn (skip storing silence as a "spoken" turn's words)
     await db.logTurn(sessionId, "user", content);
     if (silentCount === 0) {
       await db.bumpSpoken(userId, sessionId, secondsSpoken, countWords(content));
@@ -232,10 +239,11 @@ app.post("/api/turn", async (req, res) => {
 
     const reply = await askToki({ system, messages });
 
+    // Store a combined assistant turn so history stays coherent for the model.
     const combined = [reply.roast_vi, reply.teach_en, reply.next_en].filter(Boolean).join(" ");
     await db.logTurn(sessionId, "assistant", combined);
-    await db.logErrors(userId, sessionId, reply.errors_noticed); 
-    if (reply.vocab && reply.vocab.length) await db.saveVocab(userId, reply.vocab); 
+    await db.logErrors(userId, sessionId, reply.errors_noticed); // hidden, for review only
+    if (reply.vocab && reply.vocab.length) await db.saveVocab(userId, reply.vocab); // notebook
 
     res.json({
       roast_vi: reply.roast_vi,
@@ -250,6 +258,7 @@ app.post("/api/turn", async (req, res) => {
       vocabThisTurn: (reply.vocab || []).length,
     });
   } catch (e) {
+    // graceful fallback so the session never crashes
     res.json({
       roast_vi: "Ơ, mạng lag hay sao á, nói lại giúp mình cái nào!",
       teach_en: "",
@@ -264,6 +273,8 @@ app.post("/api/turn", async (req, res) => {
   }
 });
 
+// ---- POST /api/chat : stateless proxy for local testing / client-managed history ----
+// body: { messages: [{role, content}, ...] }  -> returns the full parsed Toki reply.
 app.post("/api/chat", async (req, res) => {
   try {
     const { messages } = req.body || {};
@@ -272,7 +283,7 @@ app.post("/api/chat", async (req, res) => {
     }
     const system = buildSystemPrompt({ sessionNumber: 1, confidenceLevel: "low", streakDays: 1 });
     const reply = await askToki({ system, messages });
-    res.json(reply); 
+    res.json(reply); // roast_vi, teach_en, next_en, vi_translation, scaffold_chips, errors_noticed, used_vietnamese, encouragement
   } catch (e) {
     console.error("chat error:", e.message);
     res.json({
@@ -285,21 +296,28 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
+// ---- POST /api/tts : high-quality voice via Azure Speech (Neural) ----
+// Returns MP3 audio. If AZURE_SPEECH_KEY/REGION are not set, responds 501 so the
+// frontend gracefully falls back to the browser's built-in speech voice.
 const AZURE_KEY = process.env.AZURE_SPEECH_KEY;
 const AZURE_REGION = process.env.AZURE_SPEECH_REGION || "southeastasia";
 const AZURE_VOICE = process.env.AZURE_SPEECH_VOICE || "en-US-SaraNeural";
 
+// Escape text so it's safe inside SSML/XML.
 function xmlEscape(s) {
   return String(s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
 
+// Simple in-memory cache: voice+text -> mp3 Buffer. Shared across all users, so
+// repeated lines (openers, common replies) are spoken by Azure only once.
+// Capped so memory can't grow unbounded; oldest entries drop first.
 const TTS_CACHE = new Map();
 const TTS_CACHE_MAX = 500;
 function ttsCacheGet(key) {
   const v = TTS_CACHE.get(key);
-  if (v) { TTS_CACHE.delete(key); TTS_CACHE.set(key, v); } 
+  if (v) { TTS_CACHE.delete(key); TTS_CACHE.set(key, v); } // mark as recently used
   return v;
 }
 function ttsCacheSet(key, buf) {
@@ -324,6 +342,7 @@ app.post("/api/tts", async (req, res) => {
       return res.send(cached);
     }
 
+    // Build SSML. Lang must match the voice.
     const ssml =
       `<speak version='1.0' xml:lang='en-US'>` +
       `<voice xml:lang='en-US' name='${AZURE_VOICE}'>${xmlEscape(text)}</voice>` +
@@ -357,6 +376,11 @@ app.post("/api/tts", async (req, res) => {
   }
 });
 
+// ---- POST /api/stt : speech-to-text via Azure (returns the RAW transcript) ----
+// Body: { audio: <base64>, contentType?: "audio/wav" | "audio/ogg; codecs=opus" }
+// We deliberately want the literal words the user said (including mistakes), so the
+// learner gets corrected on what they ACTUALLY said — unlike on-device STT that
+// silently "fixes" grammar. Keep the audio short (push-to-talk, a few seconds).
 app.post("/api/stt", async (req, res) => {
   try {
     if (!AZURE_KEY) return res.status(501).json({ error: "stt not configured" });
@@ -364,6 +388,7 @@ app.post("/api/stt", async (req, res) => {
     if (!audio) return res.status(400).json({ error: "audio required" });
 
     const buf = Buffer.from(audio, "base64");
+    // Azure short-audio REST endpoint. Content-Type must match what the app records.
     const ct = contentType || "audio/wav; codecs=audio/pcm; samplerate=16000";
     const url =
       `https://${AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1` +
@@ -394,6 +419,7 @@ app.post("/api/stt", async (req, res) => {
   }
 });
 
+// ---- GET /api/review?userId=... : the optional, positive review list ----
 app.get("/api/review", async (req, res) => {
   try {
     const { userId } = req.query;
@@ -405,6 +431,7 @@ app.get("/api/review", async (req, res) => {
   }
 });
 
+// ---- GET /api/vocab?userId=... : the saved-words notebook ----
 app.get("/api/vocab", async (req, res) => {
   try {
     const { userId } = req.query;
@@ -415,6 +442,7 @@ app.get("/api/vocab", async (req, res) => {
   }
 });
 
+// ---- GET /api/progress?userId=... : journey stats ----
 app.get("/api/progress", async (req, res) => {
   try {
     const { userId } = req.query;
