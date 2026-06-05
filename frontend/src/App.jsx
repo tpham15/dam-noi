@@ -916,13 +916,18 @@ export default function App() {
       if (r.limitReached) { limitHitRef.current = true; setLimitHit(true); clearSilence(); }
       if (typeof r.streakDays === "number") setStreak(r.streakDays);
       if (r.errorsThisTurn) setErrorCount((c) => c + r.errorsThisTurn);
-      // Give the user a moment to read the Vietnamese (roast + translation) BEFORE
-      // Toki speaks the English, so the voice doesn't talk over their reading.
-      // Wait scales with how much Vietnamese there is, clamped to a sensible range.
-      const viLen = (roast + " " + stripQ(r.vi_translation)).trim().length;
-      const waitMs = Math.max(1500, Math.min(3500, 700 + viLen * 22));
+      // When Toki CORRECTED a mistake, wait a moment so the user can read the fix
+      // before the English is spoken. When the user was CORRECT (no correction),
+      // don't delay — Toki replies right away so the conversation feels natural.
+      const hadCorrection = (r.errorsThisTurn || 0) > 0;
       if (autoSpeakTimerRef.current) clearTimeout(autoSpeakTimerRef.current);
-      autoSpeakTimerRef.current = setTimeout(() => { speakEn(en); }, waitMs);
+      if (hadCorrection) {
+        const viLen = (roast + " " + stripQ(r.vi_translation)).trim().length;
+        const waitMs = Math.max(1500, Math.min(3500, 700 + viLen * 22));
+        autoSpeakTimerRef.current = setTimeout(() => { speakEn(en); }, waitMs);
+      } else {
+        speakEn(en); // no correction to read — speak immediately
+      }
     } catch {
       const fbEn = "Hmm, say that again for me?";
       setUi((p) => [...p, { who: "t", roast: "", en: fbEn, vi: "" }]);
