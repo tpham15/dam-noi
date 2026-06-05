@@ -578,6 +578,7 @@ const STYLE = `
 @keyframes ring{0%{transform:scale(1);opacity:.9}100%{transform:scale(1.35);opacity:0}}
 .mhint{font-size:12.5px;color:var(--muted);font-weight:700;text-align:center;}
 .limitbox{text-align:center;padding:10px 14px;}
+.warmbar{margin:10px 14px 0;padding:10px 14px;border-radius:12px;background:rgba(255,179,71,.12);border:1px solid #FFB34744;color:var(--sun);font-size:13.5px;font-weight:600;text-align:center;}
 .limitt{font-weight:800;color:var(--coral);font-size:16px;}
 .limitd{font-size:13px;color:var(--muted);font-weight:600;margin-top:5px;line-height:1.45;}
 .microw{display:flex;align-items:center;justify-content:center;gap:18px;}
@@ -653,12 +654,14 @@ export default function App() {
   const [showStarters, setShowStarters] = useState(false);
   const [typing, setTyping] = useState(false); // silent-mode text input toggle
   const [limitHit, setLimitHit] = useState(false); // daily free cap reached
+  const [backendReady, setBackendReady] = useState(false); // false until /api/health responds
   const limitHitRef = useRef(false);
   useEffect(() => { limitHitRef.current = limitHit; }, [limitHit]);
   const [account, setAccountState] = useState(() => getAccount()); // {email,name} when logged in
   const [recording, setRecording] = useState(false); // server-STT recording in progress
   const [sttBusy, setSttBusy] = useState(false);      // waiting for transcript
   const mediaRecRef = useRef(null);
+  const maxRecTimerRef = useRef(null); // safety auto-stop so mic can't hang forever
   const chunksRef = useRef([]);
   const streamRef = useRef(null);
   const recordStartRef = useRef(0);
@@ -756,6 +759,16 @@ export default function App() {
       if (el) { el.pause(); el.removeAttribute("src"); el.load(); }
     } catch {}
   }, []);
+  // Free all cached TTS object URLs (call when leaving/finishing a session so a long
+  // chat doesn't leak memory by holding every sentence's audio forever).
+  const clearTtsCache = useCallback(() => {
+    try {
+      for (const url of ttsCacheRef.current.values()) {
+        try { URL.revokeObjectURL(url); } catch {}
+      }
+    } catch {}
+    ttsCacheRef.current.clear();
+  }, []);
   const speakEn = useCallback(async (enText) => {
     if (!ttsRef.current || !enText) return;
     // New utterance cancels any previous one (prevents 3-4 overlapping voices when
@@ -838,10 +851,22 @@ export default function App() {
     window.speechSynthesis.addEventListener?.("voiceschanged", warm);
     return () => window.speechSynthesis.removeEventListener?.("voiceschanged", warm);
   }, []);
-  // Wake the backend as soon as the app opens, so it's up by the time the user
-  // reaches the chat and needs the Azure voice (Render free sleeps when idle).
+  // Wake the backend as soon as the app opens (Render free sleeps when idle).
+  // Keep retrying until it responds, and track readiness so we can tell the user
+  // "warming up" instead of leaving them with a silent, seemingly-broken app.
   useEffect(() => {
-    fetch(`${API}/api/health`).catch(() => {});
+    let cancelled = false;
+    let tries = 0;
+    const ping = async () => {
+      tries++;
+      try {
+        const r = await fetch(`${API}/api/health`, { cache: "no-store" });
+        if (r.ok) { if (!cancelled) setBackendReady(true); return; }
+      } catch {}
+      if (!cancelled && tries < 20) setTimeout(ping, 3000); // retry every 3s while it wakes
+    };
+    ping();
+    return () => { cancelled = true; };
   }, []);
   useEffect(() => { if (screen !== "chat") return; const id = setInterval(() => setElapsed((e) => e + 1), 1000); return () => clearInterval(id); }, [screen]);
 
@@ -996,8 +1021,8 @@ export default function App() {
     try { navigator.clipboard.writeText(cap); } catch {}
   };
 
-  const leave = () => { clearSilence(); stopAllSpeech(); setScreen("home"); };
-  const finish = () => { clearSilence(); stopAllSpeech(); setListening(false); setScreen("finish"); };
+  const leave = () => { clearSilence(); stopAllSpeech(); clearTtsCache(); setScreen("home"); };
+  const finish = () => { clearSilence(); stopAllSpeech(); clearTtsCache(); setListening(false); setScreen("finish"); };
 
   const micErrMsg = (code) => ({
     "not-allowed": "Micro bị chặn. Mở System Settings › Privacy & Security › Microphone, bật cho Chrome, rồi tải lại trang.",
@@ -1116,6 +1141,8 @@ export default function App() {
   };
   const startRecord = async () => {
     if (loading || recording || sttBusy) return;
+    clearSilence();   // user is actively interacting — cancel any pending silence prompt
+    stopAllSpeech();  // and stop any voice currently playing
     unlockAudio();
     setMicError("");
     cleanupStream(); // make sure any previous stream is fully released first
@@ -1171,6 +1198,13 @@ export default function App() {
       recordStartRef.current = Date.now();
       rec.start();
       setRecording(true);
+      // Safety net: if every stop event somehow misses, never let the mic hang.
+      if (maxRecTimerRef.current) clearTimeout(maxRecTimerRef.current);
+      maxRecTimerRef.current = setTimeout(() => {
+        if (mediaRecRef.current && mediaRecRef.current.state === "recording") {
+          try { mediaRecRef.current.stop(); } catch {}
+        }
+      }, 30000);
     } catch (err) {
       cleanupStream();
       setRecording(false); setSttBusy(false);
@@ -1181,6 +1215,7 @@ export default function App() {
 
   const stopRecord = () => {
     if (!recording) return;
+    if (maxRecTimerRef.current) { clearTimeout(maxRecTimerRef.current); maxRecTimerRef.current = null; }
     recordStartRef.current = Date.now(); // start latency clock at release
     try { mediaRecRef.current?.stop(); } catch { cleanupStream(); setRecording(false); setSttBusy(false); }
     // recording flag is cleared in onstop/onerror to avoid races
@@ -1226,6 +1261,9 @@ export default function App() {
 
           {screen === "home" && (
             <>
+              {!backendReady && (
+                <div className="warmbar">⏳ Đang khởi động Toki… chờ chút xíu rồi nói chuyện được liền nha.</div>
+              )}
               <div className="home-h">
                 <div className="hi">Hôm nay muốn nói gì nào?</div>
                 <h2 className="disp">Chào {account?.name ? account.name.split(" ").slice(-1)[0] : "ní"} 👋</h2>
@@ -1358,6 +1396,7 @@ export default function App() {
                         onMouseLeave={() => { if (recording) stopRecord(); }}
                         onTouchStart={(e) => { e.preventDefault(); startRecord(); }}
                         onTouchEnd={(e) => { e.preventDefault(); stopRecord(); }}
+                        onTouchCancel={(e) => { e.preventDefault(); if (recording) stopRecord(); }}
                         onContextMenu={(e) => e.preventDefault()}
                       >
                         <Mic size={30} />

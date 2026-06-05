@@ -40,3 +40,12 @@ Thumbs.db
 *.p12
 *.key
 *.mobileprovision
+
+# ===== Capacitor / iOS (Xcode) — sinh lại được bằng `npx cap add ios`, không push =====
+ios/
+android/
+**/Pods/
+*.xcuserstate
+**/xcuserdata/
+DerivedData/
+.cap/

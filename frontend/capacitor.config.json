@@ -1,0 +1,11 @@
+{
+  "appId": "com.moho.app",
+  "appName": "MoHo",
+  "webDir": "dist",
+  "ios": {
+    "contentInset": "always"
+  },
+  "server": {
+    "iosScheme": "https"
+  }
+}
