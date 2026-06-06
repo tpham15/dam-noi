@@ -94,13 +94,16 @@ async function ensureUser(userId) {
 async function startSession(userId) {
   const u = await ensureUser(userId);
   const t = today();
-  let streak = u.streak_days;
-  if (u.last_active_date === t) {
-    // already active today — unchanged
-  } else if (u.last_active_date && dayDiff(u.last_active_date, t) === 1) {
-    streak = u.streak_days + 1;
+  // Only ever compare the date portion (YYYY-MM-DD), so re-entering the app
+  // multiple times in one day can NEVER advance the streak.
+  const lastDay = u.last_active_date ? String(u.last_active_date).slice(0, 10) : null;
+  let streak = u.streak_days || 0;
+  if (lastDay === t) {
+    // already active today — streak unchanged (this is the key fix)
+  } else if (lastDay && dayDiff(lastDay, t) === 1) {
+    streak = streak + 1;       // consecutive next day
   } else {
-    streak = 1;
+    streak = 1;                // first ever, or a gap — restart at 1
   }
   const sessionNumber = u.total_sessions + 1;
   await pool.query(

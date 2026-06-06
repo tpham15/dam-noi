@@ -1221,7 +1221,6 @@ export default function App() {
   const stopRecord = () => {
     if (!recording) return;
     if (maxRecTimerRef.current) { clearTimeout(maxRecTimerRef.current); maxRecTimerRef.current = null; }
-    recordStartRef.current = Date.now(); // start latency clock at release
     try { mediaRecRef.current?.stop(); } catch { cleanupStream(); setRecording(false); setSttBusy(false); }
     // recording flag is cleared in onstop/onerror to avoid races
   };
@@ -1395,20 +1394,15 @@ export default function App() {
                       <button
                         className={`bigmic ${recording ? "on" : ""}`}
                         disabled={loading || sttBusy}
-                        title="Ấn giữ để nói (nhận giọng qua server)"
-                        onMouseDown={startRecord}
-                        onMouseUp={stopRecord}
-                        onMouseLeave={() => { if (recording) stopRecord(); }}
-                        onTouchStart={(e) => { e.preventDefault(); startRecord(); }}
-                        onTouchEnd={(e) => { e.preventDefault(); stopRecord(); }}
-                        onTouchCancel={(e) => { e.preventDefault(); if (recording) stopRecord(); }}
+                        title={recording ? "Bấm để dừng và gửi" : "Bấm để nói"}
+                        onClick={() => { if (recording) stopRecord(); else startRecord(); }}
                         onContextMenu={(e) => e.preventDefault()}
                       >
                         <Mic size={30} />
                       </button>
                       <div className="kbspacer" />
                     </div>
-                    <div className="mhint" style={micError ? { color: "var(--coral)" } : undefined}>{micError ? micError : sttBusy ? "Đang nghe bạn nói…" : recording ? "Đang ghi… thả ra để gửi" : "Ấn giữ để nói — hoặc bấm ⌨ để gõ"}</div>
+                    <div className="mhint" style={micError ? { color: "var(--coral)" } : undefined}>{micError ? micError : sttBusy ? "Đang nghe bạn nói…" : recording ? "🔴 Đang ghi… bấm lại để gửi" : "Bấm mic để nói — hoặc bấm ⌨ để gõ"}</div>
                   </>
                 ) : (
                   <div className="typewrap">
