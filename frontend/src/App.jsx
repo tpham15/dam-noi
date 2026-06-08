@@ -586,6 +586,16 @@ const STYLE = `
 .streakcelebrate{font-size:17px!important;justify-content:center;gap:10px;}
 .streakfire{font-size:28px;animation:firebounce 0.6s ease-in-out infinite alternate;}
 @keyframes firebounce{from{transform:scale(1) rotate(-5deg)}to{transform:scale(1.2) rotate(5deg)}}
+.flamegrid{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin:24px 0 16px;}
+.flamecell{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:44px;}
+.flameicon{font-size:28px;transition:transform .2s;}
+.flame-lit .flameicon{animation:firebounce 0.7s ease-in-out infinite alternate;}
+.flame-dim .flameicon{filter:grayscale(1);opacity:.35;}
+.flameday{font-size:10px;color:var(--ink);opacity:.5;font-weight:600;}
+.flame-lit .flameday{opacity:.8;color:var(--coral);}
+.streak-milestone{text-align:center;background:rgba(255,179,71,.15);border:1px solid #FFB34755;border-radius:12px;padding:12px 16px;font-weight:700;font-size:15px;margin-top:8px;}
+.streak-reminder{text-align:center;background:rgba(255,94,58,.1);border:1px solid #FF5E3A44;border-radius:12px;padding:12px 16px;font-size:14px;margin-top:12px;color:var(--coral);font-weight:600;}
+.streak-done{text-align:center;background:rgba(18,169,116,.1);border:1px solid #12A97444;border-radius:12px;padding:12px 16px;font-size:14px;margin-top:12px;color:#12A974;font-weight:600;}
 .limitt{font-weight:800;color:var(--coral);font-size:16px;}
 .limitd{font-size:13px;color:var(--muted);font-weight:600;margin-top:5px;line-height:1.45;}
 .microw{display:flex;align-items:center;justify-content:center;gap:18px;}
@@ -650,6 +660,7 @@ export default function App() {
   const [showVocab, setShowVocab] = useState(false);
   const [vocabItems, setVocabItems] = useState([]);
   const [showProgress, setShowProgress] = useState(false);
+  const [showStreak, setShowStreak] = useState(false);
   const [progress, setProgress] = useState(null);
   const [showBrag, setShowBrag] = useState(false);
   const [revealed, setRevealed] = useState({}); // msgIndex -> bool
@@ -1291,7 +1302,7 @@ export default function App() {
                 <div className="hi">Hôm nay muốn nói gì nào?</div>
                 <h2 className="disp">Chào {account?.name ? account.name.split(" ").slice(-1)[0] : "ní"} 👋</h2>
                 <div className="streakbar">
-                  <button className="pill fire tap streakpill" onClick={openProgress}><Flame size={16} /> <span className="streaknum">{streak}</span> ngày 🔥</button>
+                  <button className="pill fire tap streakpill" onClick={() => setShowStreak(true)}><Flame size={16} /> <span className="streaknum">{streak}</span> ngày 🔥</button>
                   <button className="pill book tap" onClick={openVocab}><BookOpen size={15} /> Sổ từ vựng</button>
                   <button className="pill min tap" onClick={openProgress}><TrendingUp size={15} /> Hành trình</button>
                   {account
@@ -1505,6 +1516,34 @@ export default function App() {
                     {v.situation_vi ? <div className="vs">💬 {v.situation_vi}</div> : null}
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+
+          {showStreak && (
+            <div className="drawer" onClick={() => setShowStreak(false)}>
+              <div className="sheet" onClick={(e) => e.stopPropagation()}>
+                <button className="closeb" onClick={() => setShowStreak(false)}><X size={18} /></button>
+                <h3 className="disp"><Flame size={20} color="#FF5E3A" /> Chuỗi ngày của ní</h3>
+                <p className="lead">{streak > 1 ? `Ní đang có chuỗi ${streak} ngày liên tiếp — đừng để tắt nhé! 🔥` : "Nói mỗi ngày để giữ chuỗi. Hôm nay là ngày đầu tiên!"}</p>
+                <div className="flamegrid">
+                  {Array.from({ length: 7 }, (_, i) => (
+                    <div key={i} className={`flamecell ${i < streak ? "flame-lit" : "flame-dim"}`}>
+                      <span className="flameicon">{i < streak ? "🔥" : "🩶"}</span>
+                      <span className="flameday">Ngày {i + 1}</span>
+                    </div>
+                  ))}
+                </div>
+                {streak >= 7 && (
+                  <div className="streak-milestone">🏆 Tuần hoàn hảo! Ní chuẩn quá đi!</div>
+                )}
+                {!spokeToday && streak > 0 && (
+                  <div className="streak-reminder">💬 Hôm nay chưa nói — vào nói vài câu để giữ chuỗi nhé!</div>
+                )}
+                {spokeToday && (
+                  <div className="streak-done">✅ Hôm nay xong rồi — chuỗi được giữ!</div>
+                )}
               </div>
             </div>
           )}
