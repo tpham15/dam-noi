@@ -479,7 +479,7 @@ const STYLE = `
 .skip{margin-top:18px;background:none;border:none;color:var(--muted);font-family:'Space Grotesk',sans-serif;font-weight:800;font-size:14px;cursor:pointer;text-decoration:underline;}
 
 /* home / topics */
-.home-h{padding:20px 22px 4px;}
+.home-h{padding:20px 22px 4px;position:relative;}
 .home-h .hi{font-size:13px;color:var(--muted);font-weight:600;}
 .home-h h2{font-family:'Space Grotesk',sans-serif;letter-spacing:-0.02em;font-size:26px;font-weight:700;margin:2px 0 0;}
 .streakbar{display:flex;gap:8px;padding:14px 0 2px;flex-wrap:wrap;}
@@ -615,6 +615,9 @@ const STYLE = `
 .streak-reminder{text-align:center;background:rgba(255,94,58,.1);border:1px solid #FF5E3A44;border-radius:12px;padding:12px 16px;font-size:14px;margin-top:12px;color:var(--coral);font-weight:600;}
 .streak-done{text-align:center;background:rgba(18,169,116,.1);border:1px solid #12A97444;border-radius:12px;padding:12px 16px;font-size:14px;margin-top:12px;color:#12A974;font-weight:600;}
 .pill.lv{background:rgba(255,179,71,.12);border-color:#FFB34755;color:var(--sun);font-weight:700;}
+.lv-avatar{position:absolute;top:14px;right:14px;display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:none;cursor:pointer;padding:0;}
+.lv-avatar-circle{width:62px;height:62px;border-radius:50%;background:linear-gradient(135deg,#FF5E3A,#FFB347);display:flex;align-items:center;justify-content:center;font-size:30px;border:2.5px solid rgba(255,255,255,.18);box-shadow:0 4px 16px rgba(255,94,58,.35);}
+.lv-avatar-name{font-size:11px;font-weight:800;color:var(--coral);letter-spacing:.3px;}
 .levelsect{margin-top:20px;border-top:1px solid rgba(255,255,255,.08);padding-top:18px;}
 .levelrow{display:flex;align-items:center;gap:14px;margin-bottom:12px;}
 .levelicon{font-size:32px;}
@@ -1337,11 +1340,16 @@ export default function App() {
                 <div className="warmbar">⏳ Đang khởi động Toki… chờ chút xíu rồi nói chuyện được liền nha.</div>
               )}
               <div className="home-h">
+                <button className="lv-avatar" onClick={openStreakDrawer}>
+                  <div className="lv-avatar-circle">
+                    <span className="lv-avatar-icon">{getLevel(progress?.totalSessions).icon}</span>
+                  </div>
+                  <span className="lv-avatar-name">{getLevel(progress?.totalSessions).name}</span>
+                </button>
                 <div className="hi">Hôm nay muốn nói gì nào?</div>
                 <h2 className="disp">Chào {account?.name ? account.name.split(" ").slice(-1)[0] : "ní"} 👋</h2>
                 <div className="streakbar">
                   <button className="pill fire tap streakpill" onClick={openStreakDrawer}><Flame size={16} /> <span className="streaknum">{streak}</span> ngày 🔥</button>
-                  <button className="pill lv tap" onClick={openStreakDrawer}>{getLevel(progress?.totalSessions).icon} {getLevel(progress?.totalSessions).name}</button>
                   <button className="pill book tap" onClick={openVocab}><BookOpen size={15} /> Sổ từ vựng</button>
                   <button className="pill min tap" onClick={openProgress}><TrendingUp size={15} /> Hành trình</button>
                   {account
