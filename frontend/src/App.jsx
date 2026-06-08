@@ -38,6 +38,24 @@ HARD MOMENTS:
 OUTPUT: Respond with ONLY a single valid JSON object, no prose, no markdown fences:
 {"spoken_reply":"what Toki says aloud, natural spoken English, contains any invisible recast, no emoji","vi_translation":"natural Vietnamese translation of spoken_reply for the optional reveal-translation feature","scaffold_chips":["0-4 short tap-to-say options, 1-3 words each, empty when not needed"],"errors_noticed":[{"said":"...","natural":"...","type":"tense|article|preposition|plural|word-order|other"}],"used_vietnamese":false,"encouragement":"short milestone praise or empty string"}`;
 
+const LEVELS = [
+  { lv: 1, icon: "🪖", name: "Tân Binh",    desc: "Mới nhập ngũ",        min: 0  },
+  { lv: 2, icon: "⚔️",  name: "Chiến Binh",  desc: "Bắt đầu chiến",       min: 5  },
+  { lv: 3, icon: "🛡️",  name: "Dũng Sĩ",    desc: "Đã thành hình",       min: 15 },
+  { lv: 4, icon: "🦅",  name: "Mãnh Tướng", desc: "Oai rồi đó",          min: 30 },
+  { lv: 5, icon: "👑",  name: "Huyền Thoại",desc: "Không ai qua được",   min: 60 },
+];
+const getLevel = (sessions = 0) => {
+  for (let i = LEVELS.length - 1; i >= 0; i--) {
+    if (sessions >= LEVELS[i].min) return LEVELS[i];
+  }
+  return LEVELS[0];
+};
+const getNextLevel = (sessions = 0) => {
+  const cur = getLevel(sessions);
+  return LEVELS.find(l => l.lv === cur.lv + 1) || null;
+};
+
 const TOPICS = [
   { id: "free", icon: "rabbit", vi: "Nói tự do", en: "Say anything", desc: "Bất cứ điều gì trong đầu bạn", seed: "[TOPIC: Free talk]", hue: "#12A974",
     openers: [
@@ -596,6 +614,19 @@ const STYLE = `
 .streak-milestone{text-align:center;background:rgba(255,179,71,.15);border:1px solid #FFB34755;border-radius:12px;padding:12px 16px;font-weight:700;font-size:15px;margin-top:8px;}
 .streak-reminder{text-align:center;background:rgba(255,94,58,.1);border:1px solid #FF5E3A44;border-radius:12px;padding:12px 16px;font-size:14px;margin-top:12px;color:var(--coral);font-weight:600;}
 .streak-done{text-align:center;background:rgba(18,169,116,.1);border:1px solid #12A97444;border-radius:12px;padding:12px 16px;font-size:14px;margin-top:12px;color:#12A974;font-weight:600;}
+.pill.lv{background:rgba(255,179,71,.12);border-color:#FFB34755;color:var(--sun);font-weight:700;}
+.levelsect{margin-top:20px;border-top:1px solid rgba(255,255,255,.08);padding-top:18px;}
+.levelrow{display:flex;align-items:center;gap:14px;margin-bottom:12px;}
+.levelicon{font-size:32px;}
+.levelname{font-size:16px;font-weight:800;color:var(--ink);}
+.leveldesc{font-size:12px;opacity:.6;margin-top:2px;}
+.levelbar{height:8px;background:rgba(255,255,255,.1);border-radius:8px;overflow:hidden;margin-bottom:6px;}
+.levelbarfill{height:100%;background:linear-gradient(90deg,var(--coral),var(--sun));border-radius:8px;transition:width .6s ease;}
+.levelnext{font-size:12px;opacity:.55;text-align:right;margin-bottom:16px;}
+.levelall{display:flex;flex-wrap:wrap;gap:8px;}
+.levelchip{display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:20px;font-size:12px;font-weight:600;}
+.levelchip.unlocked{background:rgba(255,94,58,.12);color:var(--coral);border:1px solid #FF5E3A44;}
+.levelchip.locked{background:rgba(255,255,255,.05);color:rgba(255,255,255,.3);border:1px solid rgba(255,255,255,.08);}
 .limitt{font-weight:800;color:var(--coral);font-size:16px;}
 .limitd{font-size:13px;color:var(--muted);font-weight:600;margin-top:5px;line-height:1.45;}
 .microw{display:flex;align-items:center;justify-content:center;gap:18px;}
@@ -1032,6 +1063,13 @@ export default function App() {
     try { setVocabItems(await apiVocab(userId)); } catch {}
   };
 
+  const openStreakDrawer = async () => {
+    setShowStreak(true);
+    const userId = sessionRef.current.userId || getUserId();
+    if (!userId) return;
+    try { setProgress(await apiProgress(userId)); } catch {}
+  };
+
   const openProgress = async () => {
     setShowProgress(true);
     const userId = sessionRef.current.userId || getUserId();
@@ -1302,7 +1340,8 @@ export default function App() {
                 <div className="hi">Hôm nay muốn nói gì nào?</div>
                 <h2 className="disp">Chào {account?.name ? account.name.split(" ").slice(-1)[0] : "ní"} 👋</h2>
                 <div className="streakbar">
-                  <button className="pill fire tap streakpill" onClick={() => setShowStreak(true)}><Flame size={16} /> <span className="streaknum">{streak}</span> ngày 🔥</button>
+                  <button className="pill fire tap streakpill" onClick={openStreakDrawer}><Flame size={16} /> <span className="streaknum">{streak}</span> ngày 🔥</button>
+                  <button className="pill lv tap" onClick={openStreakDrawer}>{getLevel(progress?.totalSessions).icon} {getLevel(progress?.totalSessions).name}</button>
                   <button className="pill book tap" onClick={openVocab}><BookOpen size={15} /> Sổ từ vựng</button>
                   <button className="pill min tap" onClick={openProgress}><TrendingUp size={15} /> Hành trình</button>
                   {account
@@ -1544,6 +1583,42 @@ export default function App() {
                 {spokeToday && (
                   <div className="streak-done">✅ Hôm nay xong rồi — chuỗi được giữ!</div>
                 )}
+
+                {/* Level section */}
+                {(() => {
+                  const sessions = progress?.totalSessions || 0;
+                  const cur = getLevel(sessions);
+                  const next = getNextLevel(sessions);
+                  const pct = next ? Math.min(100, Math.round(((sessions - cur.min) / (next.min - cur.min)) * 100)) : 100;
+                  return (
+                    <div className="levelsect">
+                      <div className="levelrow">
+                        <span className="levelicon">{cur.icon}</span>
+                        <div className="levelinfo">
+                          <div className="levelname">Lv{cur.lv} · {cur.name}</div>
+                          <div className="leveldesc">{cur.desc}</div>
+                        </div>
+                      </div>
+                      <div className="levelbar">
+                        <div className="levelbarfill" style={{width: `${pct}%`}} />
+                      </div>
+                      {next ? (
+                        <div className="levelnext">
+                          {sessions} / {next.min} buổi → {next.icon} {next.name}
+                        </div>
+                      ) : (
+                        <div className="levelnext">👑 Đã đạt cấp cao nhất — Huyền Thoại!</div>
+                      )}
+                      <div className="levelall">
+                        {LEVELS.map(l => (
+                          <div key={l.lv} className={`levelchip ${l.lv <= cur.lv ? "unlocked" : "locked"}`}>
+                            <span>{l.icon}</span><span>{l.name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           )}
