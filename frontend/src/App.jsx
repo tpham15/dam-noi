@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Mic, Send, Volume2, VolumeX, RotateCcw, X, Sparkles, Flame, Clock, Play, Languages, Rabbit, ChevronLeft, BookOpen, TrendingUp, Keyboard } from "lucide-react";
+import { Mic, Send, Volume2, VolumeX, RotateCcw, X, Sparkles, Flame, Clock, Play, Languages, Rabbit, Gauge, ChevronLeft, BookOpen, TrendingUp, Keyboard } from "lucide-react";
 
 /* ============================== TOKI BRAIN ============================== */
 const SYSTEM_PROMPT = `You are Toki, a warm, patient English speaking partner for Vietnamese learners. Most users read/write English far better than they speak it. Their real barrier is FEAR — of being wrong, of being judged. Your one job is to make them keep talking.
@@ -579,6 +579,13 @@ const STYLE = `
 .mhint{font-size:12.5px;color:var(--muted);font-weight:700;text-align:center;}
 .limitbox{text-align:center;padding:10px 14px;}
 .warmbar{margin:10px 14px 0;padding:10px 14px;border-radius:12px;background:rgba(255,179,71,.12);border:1px solid #FFB34744;color:var(--sun);font-size:13.5px;font-weight:600;text-align:center;}
+.streakpill{font-size:15px!important;font-weight:800!important;padding:8px 16px!important;background:rgba(255,107,69,.15)!important;border:1.5px solid #FF6B4566!important;}
+.streaknum{font-size:18px;font-weight:900;color:var(--coral);}
+.streak-urgent{margin:10px 14px 0;padding:12px 16px;border-radius:14px;background:linear-gradient(135deg,rgba(255,94,58,.18),rgba(255,179,71,.12));border:1.5px solid #FF5E3A66;color:var(--ink);font-size:14px;text-align:center;animation:streakpulse 2s ease-in-out infinite;}
+@keyframes streakpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,94,58,.3)}50%{box-shadow:0 0 0 6px rgba(255,94,58,.0)}}
+.streakcelebrate{font-size:17px!important;justify-content:center;gap:10px;}
+.streakfire{font-size:28px;animation:firebounce 0.6s ease-in-out infinite alternate;}
+@keyframes firebounce{from{transform:scale(1) rotate(-5deg)}to{transform:scale(1.2) rotate(5deg)}}
 .limitt{font-weight:800;color:var(--coral);font-size:16px;}
 .limitd{font-size:13px;color:var(--muted);font-weight:600;margin-top:5px;line-height:1.45;}
 .microw{display:flex;align-items:center;justify-content:center;gap:18px;}
@@ -655,6 +662,13 @@ export default function App() {
   const [typing, setTyping] = useState(false); // silent-mode text input toggle
   const [limitHit, setLimitHit] = useState(false); // daily free cap reached
   const [backendReady, setBackendReady] = useState(false); // false until /api/health responds
+  const [spokeToday, setSpokeToday] = useState(() => {
+    // persist across page reloads within the same calendar day
+    try {
+      const saved = localStorage.getItem("moho_spoke_date");
+      return saved === new Date().toISOString().slice(0, 10);
+    } catch { return false; }
+  });
   const limitHitRef = useRef(false);
   useEffect(() => { limitHitRef.current = limitHit; }, [limitHit]);
   const [account, setAccountState] = useState(() => getAccount()); // {email,name} when logged in
@@ -1027,7 +1041,12 @@ export default function App() {
   };
 
   const leave = () => { clearSilence(); stopAllSpeech(); clearTtsCache(); setScreen("home"); };
-  const finish = () => { clearSilence(); stopAllSpeech(); clearTtsCache(); setListening(false); setScreen("finish"); };
+  const finish = () => {
+    clearSilence(); stopAllSpeech(); clearTtsCache(); setListening(false); setScreen("finish");
+    // mark that the user has spoken today so we don't show the urgency banner
+    try { localStorage.setItem("moho_spoke_date", new Date().toISOString().slice(0, 10)); } catch {}
+    setSpokeToday(true);
+  };
 
   const micErrMsg = (code) => ({
     "not-allowed": "Micro bị chặn. Mở System Settings › Privacy & Security › Microphone, bật cho Chrome, rồi tải lại trang.",
@@ -1272,13 +1291,18 @@ export default function App() {
                 <div className="hi">Hôm nay muốn nói gì nào?</div>
                 <h2 className="disp">Chào {account?.name ? account.name.split(" ").slice(-1)[0] : "ní"} 👋</h2>
                 <div className="streakbar">
-                  <button className="pill fire tap" onClick={openProgress}><Flame size={15} /> {streak} ngày</button>
+                  <button className="pill fire tap streakpill" onClick={openProgress}><Flame size={16} /> <span className="streaknum">{streak}</span> ngày 🔥</button>
                   <button className="pill book tap" onClick={openVocab}><BookOpen size={15} /> Sổ từ vựng</button>
                   <button className="pill min tap" onClick={openProgress}><TrendingUp size={15} /> Hành trình</button>
                   {account
                     ? <button className="pill min tap" onClick={doLogout} title={account.email}>Đăng xuất</button>
                     : <button className="pill save tap" onClick={doLogin}>🔒 Lưu tiến trình</button>}
                 </div>
+                {streak > 1 && !spokeToday && (
+                  <div className="streak-urgent">
+                    🔥 Chuỗi <strong>{streak} ngày</strong> của ní đang chờ — nói vài câu hôm nay để giữ nhé!
+                  </div>
+                )}
               </div>
 
               {/* Hot card: Bị Toki khịa — full width, bốc lửa */}
@@ -1329,7 +1353,7 @@ export default function App() {
                   <div className="sub">{loading ? "đang nghe…" : topic?.vi}</div>
                 </div>
                 <div className="tools">
-                  <button className={`tbtn ${slow ? "act" : ""}`} title="Nói chậm lại" onClick={() => setSlow((v) => !v)}><Rabbit size={19} /></button>
+                  <button className={`tbtn ${slow ? "act" : ""}`} title="Nói chậm lại" onClick={() => setSlow((v) => !v)}><Gauge size={19} /></button>
                   <button className="tbtn" title="Bật/tắt giọng" onClick={() => { setTtsOn((v) => !v); if (window.speechSynthesis) window.speechSynthesis.cancel(); }}>{ttsOn ? <Volume2 size={19} /> : <VolumeX size={19} />}</button>
                   <button className="tbtn rev" title="Xem lại" onClick={openReview}><Sparkles size={19} />{errorCount > 0 && <span className="badge">{errorCount}</span>}</button>
                   <button className="finb" onClick={finish}>Xong</button>
@@ -1436,7 +1460,10 @@ export default function App() {
                 <div className="stat c"><div className="n">{words}</div><div className="l">Từ đã nói</div></div>
                 <div className="stat s"><div className="n">{errorCount}</div><div className="l">Cách nói mới</div></div>
               </div>
-              <div className="streakbig"><Flame size={18} /> {streak} ngày liên tiếp — giữ lửa nhé!</div>
+              <div className="streakbig streakcelebrate">
+                <span className="streakfire">🔥</span>
+                <span>Chuỗi <strong>{streak} ngày</strong> — đừng để tắt nhé!</span>
+              </div>
               <p className="praise disp">"Mỗi lần bạn dám mở miệng là một lần can đảm. Hẹn mai gặp lại?"</p>
               <div className="finbtns">
                 <button className="pri" onClick={() => { setScreen("home"); }}>Hẹn mai gặp lại 🔥</button>
