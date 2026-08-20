@@ -1,6 +1,6 @@
 {
   "appId": "com.moho.app",
-  "appName": "MoHo",
+  "appName": "Dám Nói",
   "webDir": "dist",
   "ios": {
     "contentInset": "always"

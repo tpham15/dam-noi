@@ -1,0 +1,15 @@
+{
+  "name": "dam-noi-platform",
+  "private": true,
+  "version": "5.2.0",
+  "scripts": {
+    "dev:speaking": "npm --prefix apps/speaking run dev",
+    "dev:education": "npm --prefix apps/education run dev",
+    "build:speaking": "npm --prefix apps/speaking run build",
+    "build:education": "npm --prefix apps/education run build",
+    "test:classroom": "npm --prefix backend run test:classroom",
+    "start:backend": "npm --prefix backend run start:local",
+    "test:split": "node scripts/check-phase5.1.js",
+    "test:pilot-ux": "node scripts/check-phase5.2.js"
+  }
+}

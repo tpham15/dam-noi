@@ -1,0 +1,695 @@
+diff -ruN '--exclude=PHASE3_PATCH.diff' '--exclude=node_modules' phase3base/dam-noi/PHASE3_NOTES.md phase3work/dam-noi/PHASE3_NOTES.md
+--- phase3base/dam-noi/PHASE3_NOTES.md	1970-01-01 00:00:00.000000000 +0000
++++ phase3work/dam-noi/PHASE3_NOTES.md	2026-08-16 09:35:04.688319741 +0000
+@@ -0,0 +1,149 @@
++# Dám Nói Classroom — Phase 3
++
++## Scope
++Phase 3 adds the **Teacher Mission Generator** on top of Phase 2. It does not change the Student mission engine, Azure voice path, or B2C experience.
++
++Core workflow:
++
++`Teacher input → AI Draft → Teacher Review/Edit → Save → Assign`
++
++AI generation is deliberately **draft-only**. The generator never auto-publishes or auto-assigns a mission.
++
++## What changed
++
++### Backend
++- New `backend/classroom/missionGenerator.js`
++  - grade → age-band normalization
++  - age-aware generation rules for Kids / Junior / Teen
++  - structured Anthropic tool schema
++  - teacher-target preservation
++  - deterministic fallback draft if Anthropic is unavailable
++  - mission save normalization / clamps
++- New tests: `backend/classroom/missionGenerator.test.js`
++- `npm run test:classroom` now runs both Phase 2 prompt tests and Phase 3 generator tests.
++- New teacher APIs:
++  - `POST /api/classroom/missions/generate` — returns draft only
++  - `POST /api/classroom/missions` — save reviewed mission
++  - `PUT /api/classroom/missions/:id` — edit center-owned mission only before it has been assigned
++- New DB helpers:
++  - `createMission`
++  - `getOwnedMission`
++  - `updateMission`
++- Center-created missions are listed before global seed missions.
++
++### Teacher UI
++Inside a class, teacher can click **✨ Tạo bằng AI** and provide:
++- Topic
++- Vocabulary
++- Target patterns
++- Mission type
++- Duration
++- Optional note to AI
++
++Draft review supports editing:
++- Mission title
++- Description
++- Learning objective
++- Mission type
++- Target vocabulary
++- Target patterns
++- English opening
++- Vietnamese help translation
++- AI role
++- Scene prompt
++- Target turns
++- Target speaking seconds
++- Difficulty
++
++Actions:
++- **Lưu & giao bài**
++- **Lưu vào thư viện**
++- **Generate lại**
++
++Saved center missions are labelled `⭐ Tự tạo`; seed missions remain labelled `Mẫu`.
++
++## Important guardrails
++
++### Teacher controls curriculum
++If teacher supplies vocabulary or patterns, AI must preserve those exact target items. It may design a scenario around them, but may not silently replace the curriculum target.
++
++If targets are blank, AI may suggest age-appropriate targets.
++
++### Draft-first
++`/missions/generate` writes nothing to the database. A teacher must explicitly save after reviewing the draft.
++
++### Multi-tenant protection
++Generation/save/update all verify:
++- Google teacher authentication
++- center membership
++- class ownership unless center admin
++
++Student tokens cannot use these routes.
++
++### Age/grade cannot be spoofed by draft
++The server derives grade and age band from the selected class when generating and saving. AI/client cannot change a Grade 3 mission into Teen content by sending another age band.
++
++### Assigned missions are immutable
++Once a mission has an assignment, `PUT /api/classroom/missions/:id` rejects edits. This prevents historical/in-progress homework from changing under students. Create a new mission version instead.
++
++### AI outage fallback
++If `ANTHROPIC_API_KEY` is missing or generation fails, the endpoint returns a conservative deterministic draft with `meta.source = "fallback"`. Teacher can edit it and continue working.
++
++## Manual test flow
++
++1. Start backend/frontend using Phase 2 environment variables.
++2. Go to `/teacher` and login with Google.
++3. Open a Grade 6 class.
++4. Click **✨ Tạo bằng AI**.
++5. Enter:
++   - Topic: `At the Restaurant`
++   - Vocabulary: `noodles`, `chicken`, `juice`, `delicious`
++   - Pattern: `I'd like...`
++   - Mission type: `Role-play`
++   - Duration: `4 phút`
++6. Click **Generate Mission Draft**.
++7. Verify the draft still contains the exact teacher vocabulary/pattern.
++8. Edit at least the title or opening line.
++9. Click **Lưu & giao bài**.
++10. Login at `/student` as a student in that class.
++11. Verify the new mission appears and runs through the existing Phase 2 age-aware mission engine.
++12. Complete it and verify assignment results in Teacher Portal.
++
++## Automated validation run
++
++```bash
++cd backend
++npm run test:classroom
++node --check server.js
++node --check classroom/classroomDb.js
++node --check classroom/missionGenerator.js
++```
++
++Expected:
++
++- `Classroom prompt tests passed: Kids / Junior / Teen`
++- `Mission generator tests passed: input guardrails / target preservation / save normalization`
++
++Frontend JSX was parsed with the installed TypeScript JSX parser for:
++- `TeacherApp.jsx`
++- `StudentApp.jsx`
++- `App.jsx`
++
++A full Vite build could not be completed in this execution environment because frontend dependencies are not available from the local npm cache. Run a clean install/build on the deployment machine:
++
++```bash
++cd frontend
++npm ci
++npm run build
++```
++
++## Non-goals in Phase 3
++- textbook/PDF import
++- automatic curriculum mapping
++- mission marketplace
++- parent reports
++- bulk assignment scheduling
++- mission version-history UI
++- auto-grading/pronunciation scoring
++
++Those remain later phases. Phase 3 is intentionally only the teacher-controlled mission creation workflow.
+diff -ruN '--exclude=PHASE3_PATCH.diff' '--exclude=node_modules' phase3base/dam-noi/backend/classroom/classroomDb.js phase3work/dam-noi/backend/classroom/classroomDb.js
+--- phase3base/dam-noi/backend/classroom/classroomDb.js	2026-08-16 09:23:42.000000000 +0000
++++ phase3work/dam-noi/backend/classroom/classroomDb.js	2026-08-16 09:28:07.833833241 +0000
+@@ -347,7 +347,7 @@
+   let where = "status='active' AND (center_id IS NULL OR center_id=$1)";
+   if (ageBand) { params.push(ageBand); where += ` AND age_band=$${params.length}`; }
+   if (grade) { params.push(Number(grade)); const p=params.length; where += ` AND (grade_min IS NULL OR grade_min <= $${p}) AND (grade_max IS NULL OR grade_max >= $${p})`; }
+-  const r = await pool.query(`SELECT * FROM missions WHERE ${where} ORDER BY difficulty,title`, params);
++  const r = await pool.query(`SELECT * FROM missions WHERE ${where} ORDER BY (center_id IS NULL), updated_at DESC, difficulty, title`, params);
+   return r.rows;
+ }
+ 
+@@ -356,6 +356,31 @@
+   return r.rows[0] || null;
+ }
+ 
++async function getOwnedMission(id, centerId) {
++  const r = await pool.query(`SELECT * FROM missions WHERE id=$1 AND center_id=$2 AND status='active'`, [id,centerId]);
++  return r.rows[0] || null;
++}
++
++async function createMission({centerId, createdBy, mission}) {
++  const id = uid('msn_');
++  const ts = now();
++  await pool.query(`INSERT INTO missions
++    (id,center_id,created_by,title,description,age_band,grade_min,grade_max,mission_type,ai_role,scene_prompt,learning_objective,target_vocab,target_patterns,target_turns,target_speaking_seconds,difficulty,opening_en,opening_vi,status,created_at,updated_at)
++    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15,$16,$17,$18,$19,'active',$20,$20)`,
++    [id,centerId,createdBy,mission.title,mission.description,mission.age_band,mission.grade_min,mission.grade_max,mission.mission_type,mission.ai_role,mission.scene_prompt,mission.learning_objective,JSON.stringify(mission.target_vocab||[]),JSON.stringify(mission.target_patterns||[]),mission.target_turns,mission.target_speaking_seconds,mission.difficulty,mission.opening_en,mission.opening_vi,ts]);
++  return getOwnedMission(id, centerId);
++}
++
++async function updateMission({id, centerId, mission}) {
++  const existing = await getOwnedMission(id, centerId);
++  if (!existing) throw new Error('mission not found');
++  const assigned = await pool.query(`SELECT 1 FROM assignments WHERE mission_id=$1 LIMIT 1`, [id]);
++  if (assigned.rowCount) throw new Error('mission already assigned; create a new mission instead of editing it');
++  await pool.query(`UPDATE missions SET title=$1,description=$2,age_band=$3,grade_min=$4,grade_max=$5,mission_type=$6,ai_role=$7,scene_prompt=$8,learning_objective=$9,target_vocab=$10::jsonb,target_patterns=$11::jsonb,target_turns=$12,target_speaking_seconds=$13,difficulty=$14,opening_en=$15,opening_vi=$16,updated_at=$17 WHERE id=$18 AND center_id=$19`,
++    [mission.title,mission.description,mission.age_band,mission.grade_min,mission.grade_max,mission.mission_type,mission.ai_role,mission.scene_prompt,mission.learning_objective,JSON.stringify(mission.target_vocab||[]),JSON.stringify(mission.target_patterns||[]),mission.target_turns,mission.target_speaking_seconds,mission.difficulty,mission.opening_en,mission.opening_vi,now(),id,centerId]);
++  return getOwnedMission(id, centerId);
++}
++
+ async function createAssignment({missionId,classId,assignedBy,dueAt}) {
+   const id = uid('asg_');
+   await pool.query(`INSERT INTO assignments (id,mission_id,class_id,assigned_by,assigned_at,due_at,status) VALUES ($1,$2,$3,$4,$5,$6,'active')`, [id,missionId,classId,assignedBy,now(),dueAt || null]);
+@@ -546,6 +571,6 @@
+ module.exports = {
+   initClassroom, setUserRole, createCenter, getCenter, getMemberships, getMembership,
+   createClass, getClass, listClasses, createStudent, getStudentInClass, listClassStudents, findStudentLogin,
+-  listMissions, getMission, createAssignment, getAssignment, listClassAssignments, listStudentAssignments,
++  listMissions, getMission, getOwnedMission, createMission, updateMission, createAssignment, getAssignment, listClassAssignments, listStudentAssignments,
+   studentHasAssignment, startAttempt, getAttempt, getMissionRuntimeBySession, recordMissionTurnSignals, getAttemptSummaryContext, saveAttemptSummary, finishAttempt, assignmentResults, gradeToBand
+ };
+diff -ruN '--exclude=PHASE3_PATCH.diff' '--exclude=node_modules' phase3base/dam-noi/backend/classroom/missionGenerator.js phase3work/dam-noi/backend/classroom/missionGenerator.js
+--- phase3base/dam-noi/backend/classroom/missionGenerator.js	1970-01-01 00:00:00.000000000 +0000
++++ phase3work/dam-noi/backend/classroom/missionGenerator.js	2026-08-16 09:34:37.562426174 +0000
+@@ -0,0 +1,242 @@
++const ALLOWED_TYPES = ['guided','roleplay','story','presentation','conversation'];
++
++const AGE_GENERATOR_RULES = {
++  kids: `KIDS (Grade 1-4): use concrete, familiar topics; tiny speaking steps; playful but not babyish. The learner may answer with one word or a short phrase. Avoid abstract discussion. Opening English should usually be <= 10 words. Prefer guided, roleplay, or story missions.`,
++  junior: `JUNIOR (Grade 5-8): create a clear role-play/challenge with a real-world outcome. Keep language practical and energetic. Encourage complete short sentences. Opening English should usually be <= 16 words.`,
++  teen: `TEEN (Grade 9-12): create authentic conversation, presentation, story, or light debate tasks. Invite reasons/examples and connected speech without making the task feel like an exam. Opening English should usually be <= 22 words.`
++};
++
++function ageBandFromGrade(grade) {
++  const g = Number(grade || 0);
++  if (g <= 4) return 'kids';
++  if (g <= 8) return 'junior';
++  return 'teen';
++}
++
++function cleanText(v, max = 500) {
++  return String(v || '').trim().replace(/\s+/g, ' ').slice(0, max);
++}
++
++function cleanList(v, maxItems = 12, maxLen = 80, allowComma = true) {
++  const raw = Array.isArray(v) ? v : String(v || '').split(allowComma ? /[\n,;]+/ : /[\n;]+/);
++  const seen = new Set();
++  const out = [];
++  for (const item of raw) {
++    const s = cleanText(item, maxLen);
++    if (!s) continue;
++    const k = s.toLowerCase();
++    if (seen.has(k)) continue;
++    seen.add(k); out.push(s);
++    if (out.length >= maxItems) break;
++  }
++  return out;
++}
++
++function clamp(n, min, max, fallback) {
++  const x = Number(n);
++  return Number.isFinite(x) ? Math.max(min, Math.min(max, Math.round(x))) : fallback;
++}
++
++function defaultMissionType(ageBand) {
++  return ageBand === 'kids' ? 'guided' : ageBand === 'junior' ? 'roleplay' : 'conversation';
++}
++
++function normalizeGeneratorInput(input = {}) {
++  const grade = clamp(input.grade, 1, 12, 5);
++  const ageBand = ageBandFromGrade(grade);
++  const topic = cleanText(input.topic, 160);
++  if (topic.length < 2) throw new Error('topic required');
++  const missionType = ALLOWED_TYPES.includes(input.missionType) ? input.missionType : defaultMissionType(ageBand);
++  return {
++    grade,
++    ageBand,
++    topic,
++    targetVocab: cleanList(input.targetVocab, 12, 60),
++    targetPatterns: cleanList(input.targetPatterns, 6, 100, false),
++    durationMinutes: clamp(input.durationMinutes, 2, 10, ageBand === 'kids' ? 3 : ageBand === 'junior' ? 4 : 6),
++    missionType,
++    teacherNote: cleanText(input.teacherNote, 400),
++  };
++}
++
++function recommendedTargets(input) {
++  const m = input.durationMinutes;
++  if (input.ageBand === 'kids') return {
++    turns: clamp(Math.ceil(m * 1.5), 4, 7, 4),
++    seconds: clamp(m * 18, 25, 90, 35),
++    difficulty: 1,
++  };
++  if (input.ageBand === 'junior') return {
++    turns: clamp(Math.ceil(m * 1.5), 5, 9, 6),
++    seconds: clamp(m * 20, 45, 150, 75),
++    difficulty: 2,
++  };
++  return {
++    turns: clamp(Math.ceil(m * 1.35), 6, 12, 8),
++    seconds: clamp(m * 23, 75, 240, 120),
++    difficulty: 3,
++  };
++}
++
++function buildMissionGeneratorPrompt(inputRaw) {
++  const input = normalizeGeneratorInput(inputRaw);
++  const suppliedVocab = input.targetVocab.length > 0;
++  const suppliedPatterns = input.targetPatterns.length > 0;
++  return `You design ONE speaking-practice mission for Dám Nói Classroom, used by an English center in Vietnam.
++
++The teacher remains in control of curriculum. Your job is to turn the teacher's lesson target into a short speaking mission, not to teach a new lesson.
++
++CLASS:
++- Grade: ${input.grade}
++- Age band: ${input.ageBand}
++- Topic: ${input.topic}
++- Requested mission type: ${input.missionType}
++- Approximate session duration: ${input.durationMinutes} minutes
++- Teacher note: ${input.teacherNote || '(none)'}
++
++TARGET LANGUAGE FROM TEACHER:
++- Vocabulary: ${input.targetVocab.length ? input.targetVocab.join(' | ') : '(teacher left blank — you may suggest up to 6 age-appropriate words)'}
++- Patterns: ${input.targetPatterns.length ? input.targetPatterns.join(' | ') : '(teacher left blank — you may suggest up to 3 useful speaking patterns)'}
++
++AGE DESIGN RULES:
++${AGE_GENERATOR_RULES[input.ageBand]}
++
++HARD RULES:
++- The mission must have one concrete speaking objective and a natural end state.
++- Keep it suitable for the exact grade above.
++- Do not create dating, sexual, violent, gambling, drug, political persuasion, or other adult/inappropriate scenarios.
++- Do not ask children for exact school, address, phone, social media, or other unnecessary personal details.
++- Do not design pronunciation/phoneme scoring or grammar tests. This is speaking practice.
++- The AI role must be a safe conversational role appropriate to the scenario.
++- scene_prompt is an instruction for Toki: describe the role, progression, and end condition. Do not include hidden scoring tricks.
++- opening_en must immediately start the speaking situation; opening_vi is its natural Vietnamese meaning/help.
++- learning_objective must be observable through speaking, not vague (avoid "improve English").
++- target_turns and target_speaking_seconds are participation targets, not grades/scores.
++- Never put markdown, JSON, labels, or commentary inside individual string fields.
++${suppliedVocab ? '- target_vocab MUST contain exactly the teacher-supplied vocabulary above, preserving wording. Do not add, remove, or replace items.' : '- Because vocabulary is blank, propose 3-6 concrete age-appropriate target words.'}
++${suppliedPatterns ? '- target_patterns MUST contain exactly the teacher-supplied patterns above, preserving wording. Do not add, remove, or replace items.' : '- Because patterns are blank, propose 1-3 natural speaking patterns.'}
++
++Create a mission draft the teacher can edit before saving/assigning.`;
++}
++
++const MISSION_GENERATOR_TOOL = {
++  name: 'classroom_mission_draft',
++  description: 'Create one editable Dám Nói Classroom speaking mission draft from teacher inputs.',
++  input_schema: {
++    type: 'object',
++    additionalProperties: false,
++    required: ['title','description','mission_type','ai_role','scene_prompt','learning_objective','target_vocab','target_patterns','target_turns','target_speaking_seconds','difficulty','opening_en','opening_vi','teacher_rationale_vi'],
++    properties: {
++      title: { type: 'string' },
++      description: { type: 'string' },
++      mission_type: { type: 'string', enum: ALLOWED_TYPES },
++      ai_role: { type: 'string' },
++      scene_prompt: { type: 'string' },
++      learning_objective: { type: 'string' },
++      target_vocab: { type: 'array', items: { type: 'string' } },
++      target_patterns: { type: 'array', items: { type: 'string' } },
++      target_turns: { type: 'integer' },
++      target_speaking_seconds: { type: 'integer' },
++      difficulty: { type: 'integer' },
++      opening_en: { type: 'string' },
++      opening_vi: { type: 'string' },
++      teacher_rationale_vi: { type: 'string' },
++    }
++  }
++};
++
++function fallbackDraft(inputRaw) {
++  const input = normalizeGeneratorInput(inputRaw);
++  const t = recommendedTargets(input);
++  const defaultVocab = input.ageBand === 'kids' ? ['happy','friend','play'] : input.ageBand === 'junior' ? ['usually','favorite','because'] : ['opinion','reason','example'];
++  const defaultPatterns = input.ageBand === 'kids' ? ['I like...'] : input.ageBand === 'junior' ? ['I like... because...'] : ['I think... because...'];
++  const role = input.missionType === 'roleplay' ? 'a friendly person in the speaking situation' : 'a supportive speaking partner';
++  return {
++    title: input.topic.slice(0, 80),
++    description: `Luyện nói về ${input.topic}.`,
++    age_band: input.ageBand,
++    grade_min: input.grade,
++    grade_max: input.grade,
++    mission_type: input.missionType,
++    ai_role: role,
++    scene_prompt: `Keep the learner speaking about ${input.topic}. Ask one age-appropriate question at a time and end naturally after the learner completes the speaking objective.`,
++    learning_objective: `Talk about ${input.topic} using short, understandable spoken English.`,
++    target_vocab: input.targetVocab.length ? input.targetVocab : defaultVocab,
++    target_patterns: input.targetPatterns.length ? input.targetPatterns : defaultPatterns,
++    target_turns: t.turns,
++    target_speaking_seconds: t.seconds,
++    difficulty: t.difficulty,
++    opening_en: input.ageBand === 'kids' ? `Hi! Let's talk about ${input.topic}.` : `Let's talk about ${input.topic}. What do you think?`,
++    opening_vi: `Mình cùng nói về ${input.topic} nhé!`,
++    teacher_rationale_vi: 'Bản dự phòng được tạo theo độ tuổi và thời lượng. Giáo viên nên chỉnh lại tình huống trước khi giao.',
++  };
++}
++
++function normalizeGeneratedDraft(raw = {}, inputRaw = {}) {
++  const input = normalizeGeneratorInput(inputRaw);
++  const fallback = fallbackDraft(input);
++  const recommended = recommendedTargets(input);
++  const missionType = ALLOWED_TYPES.includes(raw.mission_type) ? raw.mission_type : input.missionType;
++  const vocab = input.targetVocab.length ? input.targetVocab : cleanList(raw.target_vocab, 8, 60);
++  const patterns = input.targetPatterns.length ? input.targetPatterns : cleanList(raw.target_patterns, 4, 100, false);
++  return {
++    title: cleanText(raw.title, 90) || fallback.title,
++    description: cleanText(raw.description, 240) || fallback.description,
++    age_band: input.ageBand,
++    grade_min: input.grade,
++    grade_max: input.grade,
++    mission_type: missionType,
++    ai_role: cleanText(raw.ai_role, 160) || fallback.ai_role,
++    scene_prompt: cleanText(raw.scene_prompt, 1000) || fallback.scene_prompt,
++    learning_objective: cleanText(raw.learning_objective, 360) || fallback.learning_objective,
++    target_vocab: vocab.length ? vocab : fallback.target_vocab,
++    target_patterns: patterns.length ? patterns : fallback.target_patterns,
++    target_turns: clamp(raw.target_turns, Math.max(3, recommended.turns - 2), recommended.turns + 3, recommended.turns),
++    target_speaking_seconds: clamp(raw.target_speaking_seconds, Math.max(20, recommended.seconds - 30), recommended.seconds + 60, recommended.seconds),
++    difficulty: clamp(raw.difficulty, 1, 3, recommended.difficulty),
++    opening_en: cleanText(raw.opening_en, 260) || fallback.opening_en,
++    opening_vi: cleanText(raw.opening_vi, 320) || fallback.opening_vi,
++    teacher_rationale_vi: cleanText(raw.teacher_rationale_vi, 500) || '',
++  };
++}
++
++function normalizeMissionForSave(raw = {}, { grade, ageBand } = {}) {
++  const g = clamp(grade ?? raw.grade_min, 1, 12, 5);
++  const band = ageBand || ageBandFromGrade(g);
++  if (band !== ageBandFromGrade(g)) throw new Error('age band does not match grade');
++  const type = ALLOWED_TYPES.includes(raw.mission_type) ? raw.mission_type : defaultMissionType(band);
++  const title = cleanText(raw.title, 90);
++  const objective = cleanText(raw.learning_objective, 360);
++  if (title.length < 2) throw new Error('mission title required');
++  if (objective.length < 5) throw new Error('learning objective required');
++  const defaults = recommendedTargets({ grade:g, ageBand:band, durationMinutes:4 });
++  return {
++    title,
++    description: cleanText(raw.description, 240),
++    age_band: band,
++    grade_min: g,
++    grade_max: g,
++    mission_type: type,
++    ai_role: cleanText(raw.ai_role, 160) || 'a supportive speaking partner',
++    scene_prompt: cleanText(raw.scene_prompt, 1000) || `Keep the learner inside the ${title} speaking mission and move toward the objective.`,
++    learning_objective: objective,
++    target_vocab: cleanList(raw.target_vocab, 12, 60),
++    target_patterns: cleanList(raw.target_patterns, 6, 100, false),
++    target_turns: clamp(raw.target_turns, 3, 14, defaults.turns),
++    target_speaking_seconds: clamp(raw.target_speaking_seconds, 20, 300, defaults.seconds),
++    difficulty: clamp(raw.difficulty, 1, 3, defaults.difficulty),
++    opening_en: cleanText(raw.opening_en, 260) || 'Ready? Let’s start!',
++    opening_vi: cleanText(raw.opening_vi, 320),
++  };
++}
++
++module.exports = {
++  ALLOWED_TYPES,
++  ageBandFromGrade,
++  normalizeGeneratorInput,
++  buildMissionGeneratorPrompt,
++  MISSION_GENERATOR_TOOL,
++  fallbackDraft,
++  normalizeGeneratedDraft,
++  normalizeMissionForSave,
++};
+diff -ruN '--exclude=PHASE3_PATCH.diff' '--exclude=node_modules' phase3base/dam-noi/backend/classroom/missionGenerator.test.js phase3work/dam-noi/backend/classroom/missionGenerator.test.js
+--- phase3base/dam-noi/backend/classroom/missionGenerator.test.js	1970-01-01 00:00:00.000000000 +0000
++++ phase3work/dam-noi/backend/classroom/missionGenerator.test.js	2026-08-16 09:34:37.562623469 +0000
+@@ -0,0 +1,28 @@
++const assert = require('assert');
++const { normalizeGeneratorInput, normalizeGeneratedDraft, normalizeMissionForSave, fallbackDraft } = require('./missionGenerator');
++
++const kids = normalizeGeneratorInput({ grade:3, topic:'My Pets', targetVocab:['dog','cat'], targetPatterns:['I like...'], durationMinutes:3, missionType:'guided' });
++assert.equal(kids.ageBand, 'kids');
++assert.deepEqual(kids.targetVocab, ['dog','cat']);
++const commaPattern = normalizeGeneratorInput({ grade:10, topic:'Debate', targetPatterns:'First, I think...;However,...' });
++assert.deepEqual(commaPattern.targetPatterns, ['First, I think...','However,...']);
++
++const junior = normalizeGeneratedDraft({
++  title:'Toki Cafe Challenge', mission_type:'roleplay', target_vocab:['AI SHOULD NOT REPLACE'], target_patterns:['wrong'], target_turns:99, target_speaking_seconds:999,
++  learning_objective:'Order a meal politely.', ai_role:'waiter', scene_prompt:'Role-play a cafe order.', opening_en:'Hi! What would you like?', opening_vi:'Bạn muốn gọi gì?'
++}, { grade:6, topic:'Food', targetVocab:['noodles','juice'], targetPatterns:["I'd like..."], durationMinutes:4, missionType:'roleplay' });
++assert.equal(junior.age_band, 'junior');
++assert.deepEqual(junior.target_vocab, ['noodles','juice']);
++assert.deepEqual(junior.target_patterns, ["I'd like..."]);
++assert(junior.target_turns <= 9);
++assert(junior.target_speaking_seconds <= 140);
++
++const teenFallback = fallbackDraft({ grade:10, topic:'School uniforms', durationMinutes:6, missionType:'conversation' });
++assert.equal(teenFallback.age_band, 'teen');
++assert(teenFallback.target_vocab.length > 0);
++
++assert.throws(() => normalizeMissionForSave({title:'X',learning_objective:'ok'}, {grade:6,ageBand:'kids'}), /age band/);
++const saved = normalizeMissionForSave({ title:'Restaurant', learning_objective:'Order food politely', mission_type:'roleplay', target_vocab:['juice'] }, {grade:6,ageBand:'junior'});
++assert.equal(saved.grade_min,6); assert.equal(saved.grade_max,6); assert.equal(saved.age_band,'junior');
++
++console.log('Mission generator tests passed: input guardrails / target preservation / save normalization');
+diff -ruN '--exclude=PHASE3_PATCH.diff' '--exclude=node_modules' phase3base/dam-noi/backend/package.json phase3work/dam-noi/backend/package.json
+--- phase3base/dam-noi/backend/package.json	2026-08-16 09:22:02.000000000 +0000
++++ phase3work/dam-noi/backend/package.json	2026-08-16 09:28:34.566744154 +0000
+@@ -7,7 +7,7 @@
+   "scripts": {
+     "start": "node server.js",
+     "dev": "node --watch server.js",
+-    "test:classroom": "node classroom/classroomPrompt.test.js"
++    "test:classroom": "node classroom/classroomPrompt.test.js && node classroom/missionGenerator.test.js"
+   },
+   "dependencies": {
+     "cors": "^2.8.5",
+diff -ruN '--exclude=PHASE3_PATCH.diff' '--exclude=node_modules' phase3base/dam-noi/backend/server.js phase3work/dam-noi/backend/server.js
+--- phase3base/dam-noi/backend/server.js	2026-08-16 09:23:42.000000000 +0000
++++ phase3work/dam-noi/backend/server.js	2026-08-16 09:28:33.249654307 +0000
+@@ -8,6 +8,7 @@
+ const classroom = require("./classroom/classroomDb");
+ const { signToken, verifyToken, authMiddleware, hashPin, verifyPin } = require("./classroom/auth");
+ const { buildClassroomPrompt, CLASSROOM_TOOL, buildSummaryPrompt, CLASSROOM_SUMMARY_TOOL } = require("./classroom/classroomPrompt");
++const { buildMissionGeneratorPrompt, MISSION_GENERATOR_TOOL, normalizeGeneratorInput, normalizeGeneratedDraft, normalizeMissionForSave, fallbackDraft } = require("./classroom/missionGenerator");
+ 
+ const app = express();
+ app.use(cors());
+@@ -181,6 +182,16 @@
+   };
+ }
+ 
++async function askMissionDraft(generatorInput) {
++  const raw = await askStructured({
++    system: buildMissionGeneratorPrompt(generatorInput),
++    messages: [{ role: "user", content: "Create one editable mission draft for the teacher. Follow the teacher targets exactly when supplied." }],
++    tool: MISSION_GENERATOR_TOOL,
++    maxTokens: 1100,
++  });
++  return normalizeGeneratedDraft(raw, generatorInput);
++}
++
+ function countWords(s) {
+   return (s || "").trim().split(/\s+/).filter(Boolean).length;
+ }
+@@ -642,6 +653,61 @@
+   } catch(e) { res.status(500).json({error:e.message}); }
+ });
+ 
++// Phase 3: AI creates a DRAFT only. Nothing is saved or assigned until the teacher reviews it.
++app.post("/api/classroom/missions/generate", authMiddleware, async (req,res) => {
++  try {
++    if (req.auth.authSource !== 'google') return res.status(403).json({error:'teacher login required'});
++    const cls = await classroom.getClass(req.body?.classId); if (!cls) return res.status(404).json({error:'class not found'});
++    const m = await requireCenterMember(req,res,cls.center_id); if (!m) return;
++    if (m.role !== 'admin' && cls.teacher_user_id !== req.auth.userId) return res.status(403).json({error:'not your class'});
++    if (!cls.grade) return res.status(400).json({error:'class grade required'});
++    const input = normalizeGeneratorInput({
++      grade: cls.grade,
++      topic: req.body?.topic,
++      targetVocab: req.body?.targetVocab,
++      targetPatterns: req.body?.targetPatterns,
++      durationMinutes: req.body?.durationMinutes,
++      missionType: req.body?.missionType,
++      teacherNote: req.body?.teacherNote,
++    });
++    let draft, source='ai', warning='';
++    if (!API_KEY) {
++      draft = fallbackDraft(input); source='fallback'; warning='ANTHROPIC_API_KEY is not configured; generated a deterministic draft.';
++    } else {
++      try { draft = await askMissionDraft(input); }
++      catch (aiErr) {
++        console.error('mission generator AI error:', aiErr.message);
++        draft = fallbackDraft(input); source='fallback'; warning='AI generation failed; generated a safe fallback draft you can edit.';
++      }
++    }
++    res.json({ draft, meta:{ source, warning, grade:cls.grade, ageBand:cls.age_band } });
++  } catch(e) { res.status(400).json({error:e.message}); }
++});
++
++app.post("/api/classroom/missions", authMiddleware, async (req,res) => {
++  try {
++    if (req.auth.authSource !== 'google') return res.status(403).json({error:'teacher login required'});
++    const cls = await classroom.getClass(req.body?.classId); if (!cls) return res.status(404).json({error:'class not found'});
++    const m = await requireCenterMember(req,res,cls.center_id); if (!m) return;
++    if (m.role !== 'admin' && cls.teacher_user_id !== req.auth.userId) return res.status(403).json({error:'not your class'});
++    const mission = normalizeMissionForSave(req.body?.draft || {}, {grade:cls.grade,ageBand:cls.age_band});
++    const item = await classroom.createMission({centerId:cls.center_id,createdBy:req.auth.userId,mission});
++    res.json({item});
++  } catch(e) { res.status(400).json({error:e.message}); }
++});
++
++app.put("/api/classroom/missions/:id", authMiddleware, async (req,res) => {
++  try {
++    if (req.auth.authSource !== 'google') return res.status(403).json({error:'teacher login required'});
++    const cls = await classroom.getClass(req.body?.classId); if (!cls) return res.status(404).json({error:'class not found'});
++    const m = await requireCenterMember(req,res,cls.center_id); if (!m) return;
++    if (m.role !== 'admin' && cls.teacher_user_id !== req.auth.userId) return res.status(403).json({error:'not your class'});
++    const mission = normalizeMissionForSave(req.body?.draft || {}, {grade:cls.grade,ageBand:cls.age_band});
++    const item = await classroom.updateMission({id:req.params.id,centerId:cls.center_id,mission});
++    res.json({item});
++  } catch(e) { res.status(400).json({error:e.message}); }
++});
++
+ app.post("/api/classroom/assignments", authMiddleware, async (req,res) => {
+   try {
+     const cls = await classroom.getClass(req.body?.classId); if (!cls) return res.status(404).json({error:'class not found'});
+diff -ruN '--exclude=PHASE3_PATCH.diff' '--exclude=node_modules' phase3base/dam-noi/frontend/src/classroom.css phase3work/dam-noi/frontend/src/classroom.css
+--- phase3base/dam-noi/frontend/src/classroom.css	2026-08-16 09:21:46.000000000 +0000
++++ phase3work/dam-noi/frontend/src/classroom.css	2026-08-16 09:29:36.668319741 +0000
+@@ -3,3 +3,7 @@
+ @media(max-width:640px){.cr-shell{padding:14px}.cr-top{align-items:flex-start}.cr-table{display:block;overflow:auto}.cr-title{font-size:22px}}
+ /* Phase 2 — age-aware mission UX */
+ .mission-intro{padding:26px}.mission-intro.kids{font-size:17px}.mission-intro h1{margin:12px 0 6px}.intro-section{margin:16px 0;padding:14px;border-radius:16px;background:#faf7fc;text-align:left}.intro-section p{margin:7px 0 0;line-height:1.5}.target-chips,.target-mini{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}.target-chips span,.target-mini span{display:inline-flex;padding:7px 10px;border-radius:999px;background:#fff0eb;color:#c84222;font-weight:800;font-size:13px;border:1px solid #ffd6cb}.target-chips.pattern span{background:#f4effb;color:#694a8a;border-color:#e5d9f2}.big-start{width:100%;font-size:17px;padding:15px;margin-top:6px}.mission-progress{height:6px;background:#2c2837}.mission-progress>div{height:100%;background:#ff5e3a;transition:width .25s ease}.target-mini{margin:6px 0 10px}.target-mini span{background:#2a2635;color:#cfc7d8;border-color:#454052;padding:5px 8px;font-size:11px}.target-mini span.used{background:#173c2b;color:#a9edc7;border-color:#2c6a49}.bubble-vi{font-size:12px;color:#b8b0c7;margin-top:5px}.mission-enc{align-self:center;padding:7px 12px;border-radius:999px;background:#2c2637;color:#ffd0c5;font-size:12px;font-weight:800}.mission-achieved{align-self:center;max-width:92%;padding:10px 13px;border-radius:14px;background:#163c2a;border:1px solid #2c6a49;color:#bdf3d3;font-size:13px;text-align:center}.age-kids .bubble{font-size:17px}.age-kids .target-box{font-size:14px}.age-kids .mic-button{width:80px;height:80px}.achievement-card{margin:18px 0 10px;padding:15px;border-radius:16px;background:#fff6e6;text-align:left;line-height:1.5}.achievement-card b{display:block;margin-bottom:5px;color:#a45d00}.target-result{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin:12px 0}.target-result span{background:#faf7fc;border:1px solid #e8e3ef;border-radius:12px;padding:9px 11px;font-size:13px}.finish-card{padding:26px}.teacher-insight{margin:12px 0 18px;padding:14px;border-radius:16px;background:#faf7fc;border:1px solid #e8e3ef}.teacher-note{max-width:340px;white-space:normal;line-height:1.4}.coverage{font-size:12px;color:#786e82}
++/* Phase 3 — Teacher Mission Generator */
++.mission-builder{margin-bottom:18px;border-color:#ffc8b9;box-shadow:0 18px 40px rgba(255,94,58,.09)}
++.cr-label{display:grid;gap:6px;font-size:13px;font-weight:800;color:#51495b}.cr-label>span{font-size:11px;font-weight:600;color:#8b8195}.cr-textarea{min-height:94px;resize:vertical;line-height:1.45}.cr-textarea.small{min-height:68px}.builder-two{display:grid;grid-template-columns:1fr 1fr;gap:12px}.builder-three{display:grid;grid-template-columns:1.4fr .75fr 1fr;gap:12px}.review-banner{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;border-radius:15px;background:#fff6f1;border:1px solid #ffd7ca;margin-bottom:14px}.advanced{border:1px solid #e8e3ef;border-radius:15px;padding:12px 14px;background:#fbf9fc}.advanced summary{cursor:pointer;font-weight:800;color:#62586c}.builder-actions{margin-top:16px;padding-top:14px;border-top:1px solid #eee9f3}.mission-review{display:grid;gap:12px}
++@media(max-width:720px){.builder-two,.builder-three{grid-template-columns:1fr}.review-banner{align-items:flex-start;flex-direction:column}.builder-actions .cr-btn{width:100%}}
+diff -ruN '--exclude=PHASE3_PATCH.diff' '--exclude=node_modules' phase3base/dam-noi/frontend/src/teacher/TeacherApp.jsx phase3work/dam-noi/frontend/src/teacher/TeacherApp.jsx
+--- phase3base/dam-noi/frontend/src/teacher/TeacherApp.jsx	2026-08-16 09:21:47.000000000 +0000
++++ phase3work/dam-noi/frontend/src/teacher/TeacherApp.jsx	2026-08-16 09:34:26.019781427 +0000
+@@ -1,12 +1,18 @@
+ import React,{useEffect,useMemo,useRef,useState} from 'react';
+ import {GOOGLE_CLIENT_ID,loadGoogle,request,storage} from '../api/classroom.js';
+ 
++const MISSION_TYPES=[
++  ['guided','Guided — dẫn từng bước'],['roleplay','Role-play — đóng vai'],['story','Story — kể chuyện'],['presentation','Presentation — trình bày'],['conversation','Conversation — hội thoại']
++];
++const splitList=(v,max=12,allowComma=true)=>[...new Set(String(v||'').split(allowComma?/[\n,;]+/:/[\n;]+/).map(x=>x.trim()).filter(Boolean))].slice(0,max);
++const joinList=v=>Array.isArray(v)?v.join('\n'):String(v||'');
++
+ function Brand(){return <div className="cr-brand"><img src="/toki.png" alt="Toki"/>Dám Nói Classroom</div>}
+ 
+ function TeacherLogin({onLogin}){
+   const btnRef=useRef(null); const [err,setErr]=useState('');
+   useEffect(()=>{(async()=>{try{if(!GOOGLE_CLIENT_ID)throw new Error('Thiếu VITE_GOOGLE_CLIENT_ID');await loadGoogle();window.google.accounts.id.initialize({client_id:GOOGLE_CLIENT_ID,callback:async r=>{try{const d=await request('/api/auth/google',{method:'POST',body:{credential:r.credential}});storage.setTeacherToken(d.authToken);onLogin(d.authToken);}catch(e){setErr(e.message);}}});window.google.accounts.id.renderButton(btnRef.current,{theme:'outline',size:'large',text:'signin_with',shape:'pill'});}catch(e){setErr(e.message);}})();},[onLogin]);
+-  return <div className="cr"><div className="cr-shell cr-login"><div className="cr-card cr-center"><Brand/><h1>Teacher Portal</h1><p className="cr-muted">Đăng nhập bằng Google để quản lý lớp và giao speaking mission.</p>{err&&<div className="cr-error">{err}</div>}<div ref={btnRef} style={{display:'flex',justifyContent:'center',marginTop:18}}/><div style={{marginTop:18}}><a href="/classroom" className="cr-muted">← Quay lại</a></div></div></div></div>
++  return <div className="cr"><div className="cr-shell cr-login"><div className="cr-card cr-center"><Brand/><h1>Teacher Portal</h1><p className="cr-muted">Đăng nhập bằng Google để quản lý lớp và tạo speaking mission.</p>{err&&<div className="cr-error">{err}</div>}<div ref={btnRef} style={{display:'flex',justifyContent:'center',marginTop:18}}/><div style={{marginTop:18}}><a href="/classroom" className="cr-muted">← Quay lại</a></div></div></div></div>
+ }
+ 
+ export default function TeacherApp(){
+@@ -20,30 +26,60 @@
+   if(loading&&!me)return <div className="cr"><div className="cr-shell">Đang tải…</div></div>;
+   if(me&&(!me.centers||!me.centers.length))return <CenterOnboarding token={token} onDone={async()=>{await loadMe(token)}}/>;
+   if(selectedClass)return <ClassDetail token={token} cls={selectedClass} onBack={async()=>{setSelectedClass(null);await loadClasses()}}/>;
+-  return <div className="cr"><div className="cr-shell"><div className="cr-top"><Brand/><div className="cr-row"><select className="cr-select" value={centerId} onChange={e=>setCenterId(e.target.value)}>{(me?.centers||[]).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select><button className="cr-btn ghost" onClick={()=>{storage.setTeacherToken('');setToken('')}}>Đăng xuất</button></div></div>{err&&<div className="cr-error">{err}</div>}<div className="cr-top"><div><h1 className="cr-title">Lớp của bạn</h1><p className="cr-subtitle">Tạo lớp, thêm học sinh và giao mission có sẵn.</p></div></div><CreateClass token={token} centerId={centerId} onCreated={loadClasses}/><div className="cr-grid" style={{marginTop:18}}>{classes.map(c=><div key={c.id} className="cr-card" onClick={()=>setSelectedClass(c)} style={{cursor:'pointer'}}><span className="cr-pill">Lớp {c.grade||'—'} · {c.age_band}</span><h2>{c.name}</h2><p className="cr-muted">Mã lớp: <b>{c.class_code}</b></p><div className="cr-kpi">{c.student_count}</div><div className="cr-muted">học sinh</div></div>)}</div>{!classes.length&&<div className="cr-card cr-center" style={{marginTop:18}}>Chưa có lớp nào. Tạo lớp đầu tiên ở trên.</div>}</div></div>
++  return <div className="cr"><div className="cr-shell"><div className="cr-top"><Brand/><div className="cr-row"><select className="cr-select" value={centerId} onChange={e=>setCenterId(e.target.value)}>{(me?.centers||[]).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select><button className="cr-btn ghost" onClick={()=>{storage.setTeacherToken('');setToken('')}}>Đăng xuất</button></div></div>{err&&<div className="cr-error">{err}</div>}<div className="cr-top"><div><h1 className="cr-title">Lớp của bạn</h1><p className="cr-subtitle">Tạo lớp, thêm học sinh, tạo mission bằng AI và giao bài speaking.</p></div></div><CreateClass token={token} centerId={centerId} onCreated={loadClasses}/><div className="cr-grid" style={{marginTop:18}}>{classes.map(c=><div key={c.id} className="cr-card" onClick={()=>setSelectedClass(c)} style={{cursor:'pointer'}}><span className="cr-pill">Lớp {c.grade||'—'} · {c.age_band}</span><h2>{c.name}</h2><p className="cr-muted">Mã lớp: <b>{c.class_code}</b></p><div className="cr-kpi">{c.student_count}</div><div className="cr-muted">học sinh</div></div>)}</div>{!classes.length&&<div className="cr-card cr-center" style={{marginTop:18}}>Chưa có lớp nào. Tạo lớp đầu tiên ở trên.</div>}</div></div>
+ }
+ 
+ function CenterOnboarding({token,onDone}){const [name,setName]=useState('');const [err,setErr]=useState('');const submit=async e=>{e.preventDefault();try{await request('/api/classroom/centers',{token,method:'POST',body:{name}});onDone();}catch(x){setErr(x.message)}};return <div className="cr"><div className="cr-shell cr-login"><div className="cr-card"><Brand/><h1>Tạo trung tâm</h1><p className="cr-muted">Bạn chưa thuộc trung tâm nào. Tạo workspace đầu tiên để bắt đầu pilot.</p>{err&&<div className="cr-error">{err}</div>}<form className="cr-form" onSubmit={submit}><input className="cr-input" placeholder="VD: Sunny English Center" value={name} onChange={e=>setName(e.target.value)}/><button className="cr-btn">Tạo trung tâm</button></form></div></div></div>}
+ 
+ function CreateClass({token,centerId,onCreated}){const [open,setOpen]=useState(false);const [name,setName]=useState('');const [grade,setGrade]=useState(5);const [err,setErr]=useState('');const submit=async e=>{e.preventDefault();try{await request('/api/classroom/classes',{token,method:'POST',body:{centerId,name,grade:Number(grade)}});setName('');setOpen(false);onCreated();}catch(x){setErr(x.message)}};return <div className="cr-card">{!open?<div className="cr-row" style={{justifyContent:'space-between'}}><div><b>Thêm lớp mới</b><div className="cr-muted">Age band được tự suy ra từ lớp.</div></div><button className="cr-btn" onClick={()=>setOpen(true)}>+ Tạo lớp</button></div>:<form className="cr-form" onSubmit={submit}><div className="cr-row"><input className="cr-input" style={{flex:1}} placeholder="Tên lớp, VD: Flyers A" value={name} onChange={e=>setName(e.target.value)}/><select className="cr-select" style={{width:130}} value={grade} onChange={e=>setGrade(e.target.value)}>{Array.from({length:12},(_,i)=><option key={i+1} value={i+1}>Lớp {i+1}</option>)}</select></div>{err&&<div className="cr-error">{err}</div>}<div className="cr-row"><button className="cr-btn">Lưu lớp</button><button type="button" className="cr-btn secondary" onClick={()=>setOpen(false)}>Huỷ</button></div></form>}</div>}
+ 
+-function ClassDetail({token,cls,onBack}){const [data,setData]=useState(null);const [missions,setMissions]=useState([]);const [results,setResults]=useState(null);const [err,setErr]=useState('');const load=async()=>{try{const d=await request(`/api/classroom/classes/${cls.id}`,{token});setData(d);const m=await request(`/api/classroom/missions?centerId=${encodeURIComponent(cls.center_id)}&ageBand=${encodeURIComponent(cls.age_band)}&grade=${cls.grade||''}`,{token});setMissions(m.items||[]);}catch(e){setErr(e.message)}};useEffect(()=>{load()},[]);if(!data)return <div className="cr"><div className="cr-shell">Đang tải…</div></div>;return <div className="cr"><div className="cr-shell"><div className="cr-top"><div><button className="cr-btn ghost" onClick={onBack}>← Lớp của tôi</button><h1 className="cr-title">{data.item.name}</h1><p className="cr-subtitle">Mã lớp <b>{data.item.class_code}</b> · Lớp {data.item.grade} · {data.item.age_band}</p></div><Brand/></div>{err&&<div className="cr-error">{err}</div>}<div className="cr-grid"><div className="cr-card"><h2>Học sinh</h2><AddStudent token={token} classId={cls.id} onAdded={load}/><div className="cr-list" style={{marginTop:14}}>{data.students.map(s=><div className="cr-item" key={s.id}><b>{s.display_name}</b><div className="cr-muted">Code: {s.student_code} · Hoàn thành {s.missions_completed} mission · {Math.round((s.speaking_seconds||0)/60)} phút nói</div></div>)}</div></div><div className="cr-card"><h2>Giao mission</h2><AssignMission token={token} classId={cls.id} missions={missions} onAssigned={load}/><div className="cr-list" style={{marginTop:14}}>{data.assignments.map(a=><div className="cr-item click" key={a.id} onClick={async()=>{const r=await request(`/api/classroom/assignments/${a.id}/results`,{token});setResults(r)}}><b>{a.title}</b><div className="cr-muted">{a.completed_count}/{a.student_count} hoàn thành</div></div>)}</div></div></div>{results&&<ResultsPanel data={results} onClose={()=>setResults(null)}/>}</div></div>}
++function ClassDetail({token,cls,onBack}){
++  const [data,setData]=useState(null); const [missions,setMissions]=useState([]); const [results,setResults]=useState(null); const [err,setErr]=useState(''); const [builderOpen,setBuilderOpen]=useState(false);
++  const load=async()=>{try{const d=await request(`/api/classroom/classes/${cls.id}`,{token});setData(d);const m=await request(`/api/classroom/missions?centerId=${encodeURIComponent(cls.center_id)}&ageBand=${encodeURIComponent(cls.age_band)}&grade=${cls.grade||''}`,{token});setMissions(m.items||[]);}catch(e){setErr(e.message)}};
++  useEffect(()=>{load()},[]);
++  if(!data)return <div className="cr"><div className="cr-shell">Đang tải…</div></div>;
++  return <div className="cr"><div className="cr-shell"><div className="cr-top"><div><button className="cr-btn ghost" onClick={onBack}>← Lớp của tôi</button><h1 className="cr-title">{data.item.name}</h1><p className="cr-subtitle">Mã lớp <b>{data.item.class_code}</b> · Lớp {data.item.grade} · {data.item.age_band}</p></div><Brand/></div>{err&&<div className="cr-error">{err}</div>}
++    {builderOpen&&<MissionBuilder token={token} cls={data.item} onClose={()=>setBuilderOpen(false)} onSaved={async()=>{setBuilderOpen(false);await load()}}/>}
++    <div className="cr-grid"><div className="cr-card"><h2>Học sinh</h2><AddStudent token={token} classId={cls.id} onAdded={load}/><div className="cr-list" style={{marginTop:14}}>{data.students.map(s=><div className="cr-item" key={s.id}><b>{s.display_name}</b><div className="cr-muted">Code: {s.student_code} · Hoàn thành {s.missions_completed} mission · {Math.round((s.speaking_seconds||0)/60)} phút nói</div></div>)}</div></div>
++    <div className="cr-card"><div className="cr-row" style={{justifyContent:'space-between',alignItems:'flex-start'}}><div><h2 style={{marginTop:0}}>Speaking missions</h2><div className="cr-muted">Dùng mission mẫu hoặc tạo mission đúng bài đang dạy.</div></div><button className="cr-btn" onClick={()=>setBuilderOpen(true)}>✨ Tạo bằng AI</button></div><AssignMission token={token} classId={cls.id} missions={missions} onAssigned={load}/><div className="cr-list" style={{marginTop:14}}>{data.assignments.map(a=><div className="cr-item click" key={a.id} onClick={async()=>{const r=await request(`/api/classroom/assignments/${a.id}/results`,{token});setResults(r)}}><b>{a.title}</b><div className="cr-muted">{a.completed_count}/{a.student_count} hoàn thành</div></div>)}</div></div></div>
++    {results&&<ResultsPanel data={results} onClose={()=>setResults(null)}/>}</div></div>
++}
++
++function MissionBuilder({token,cls,onClose,onSaved}){
++  const defaultType=cls.age_band==='kids'?'guided':cls.age_band==='junior'?'roleplay':'conversation';
++  const [topic,setTopic]=useState(''); const [vocab,setVocab]=useState(''); const [patterns,setPatterns]=useState(''); const [duration,setDuration]=useState(cls.age_band==='kids'?3:cls.age_band==='junior'?4:6); const [missionType,setMissionType]=useState(defaultType); const [teacherNote,setTeacherNote]=useState('');
++  const [draft,setDraft]=useState(null); const [generating,setGenerating]=useState(false); const [saving,setSaving]=useState(false); const [msg,setMsg]=useState(''); const [meta,setMeta]=useState(null);
++  const generate=async e=>{e?.preventDefault();setGenerating(true);setMsg('');try{const d=await request('/api/classroom/missions/generate',{token,method:'POST',body:{classId:cls.id,topic,targetVocab:splitList(vocab,12),targetPatterns:splitList(patterns,6,false),durationMinutes:Number(duration),missionType,teacherNote}});setDraft(d.draft);setMeta(d.meta);if(d.meta?.warning)setMsg(d.meta.warning);}catch(x){setMsg(x.message)}finally{setGenerating(false)}};
++  const change=(key,value)=>setDraft(d=>({...d,[key]:value}));
++  const save=async(assign)=>{if(!draft)return;setSaving(true);setMsg('');try{const cleanDraft={...draft,target_vocab:splitList(joinList(draft.target_vocab),12),target_patterns:splitList(joinList(draft.target_patterns),6,false),target_turns:Number(draft.target_turns),target_speaking_seconds:Number(draft.target_speaking_seconds),difficulty:Number(draft.difficulty)};const saved=await request('/api/classroom/missions',{token,method:'POST',body:{classId:cls.id,draft:cleanDraft}});if(assign)await request('/api/classroom/assignments',{token,method:'POST',body:{classId:cls.id,missionId:saved.item.id}});setMsg(assign?'Đã lưu và giao mission cho lớp.':'Đã lưu mission vào thư viện trung tâm.');setTimeout(()=>onSaved(saved.item),350);}catch(x){setMsg(x.message)}finally{setSaving(false)}};
++  return <div className="cr-card mission-builder">
++    <div className="cr-top"><div><span className="cr-pill">✨ Phase 3</span><h2 style={{marginBottom:5}}>Teacher Mission Generator</h2><p className="cr-muted">Lớp {cls.grade} · {cls.age_band}. AI chỉ tạo bản nháp; bạn duyệt trước khi lưu/giao.</p></div><button className="cr-btn secondary" onClick={onClose}>Đóng</button></div>
++    {!draft?<form className="cr-form" onSubmit={generate}>
++      <label className="cr-label">Topic / bài đang học<input className="cr-input" required placeholder="VD: At the zoo / Unit 4 Food / School rules" value={topic} onChange={e=>setTopic(e.target.value)}/></label>
++      <div className="builder-two"><label className="cr-label">Vocabulary <span>(mỗi dòng hoặc dấu phẩy)</span><textarea className="cr-input cr-textarea" placeholder={'lion\ntiger\nmonkey'} value={vocab} onChange={e=>setVocab(e.target.value)}/></label><label className="cr-label">Target patterns <span>(optional)</span><textarea className="cr-input cr-textarea" placeholder={'I can see...\nMy favorite... is...'} value={patterns} onChange={e=>setPatterns(e.target.value)}/></label></div>
++      <div className="builder-three"><label className="cr-label">Mission type<select className="cr-select" value={missionType} onChange={e=>setMissionType(e.target.value)}>{MISSION_TYPES.map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></label><label className="cr-label">Thời lượng<select className="cr-select" value={duration} onChange={e=>setDuration(e.target.value)}>{[2,3,4,5,6,8,10].map(x=><option key={x} value={x}>{x} phút</option>)}</select></label><label className="cr-label">Lớp<input className="cr-input" disabled value={`Lớp ${cls.grade} · ${cls.age_band}`}/></label></div>
++      <label className="cr-label">Ghi chú cho AI <span>(optional)</span><textarea className="cr-input cr-textarea small" placeholder="VD: Các em vừa học can/can't; ưu tiên tình huống vui, không quá khó." value={teacherNote} onChange={e=>setTeacherNote(e.target.value)}/></label>
++      {msg&&<div className="cr-error">{msg}</div>}<button className="cr-btn big-start" disabled={generating||topic.trim().length<2}>{generating?'Toki đang tạo mission…':'✨ Generate Mission Draft'}</button>
++    </form>:<div className="mission-review">
++      <div className="review-banner"><div><b>Review trước khi giao</b><div className="cr-muted">{meta?.source==='ai'?'AI draft':'Fallback draft'} · Teacher có quyền sửa toàn bộ nội dung.</div></div><button className="cr-btn secondary" onClick={()=>{setDraft(null);setMsg('')}}>← Sửa input</button></div>
++      {msg&&<div className={msg.startsWith('Đã')?'cr-success':'cr-error'}>{msg}</div>}
++      <div className="builder-two"><label className="cr-label">Tên mission<input className="cr-input" value={draft.title||''} onChange={e=>change('title',e.target.value)}/></label><label className="cr-label">Mission type<select className="cr-select" value={draft.mission_type||defaultType} onChange={e=>change('mission_type',e.target.value)}>{MISSION_TYPES.map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></label></div>
++      <label className="cr-label">Mô tả<input className="cr-input" value={draft.description||''} onChange={e=>change('description',e.target.value)}/></label>
++      <label className="cr-label">🎯 Learning objective<textarea className="cr-input cr-textarea small" value={draft.learning_objective||''} onChange={e=>change('learning_objective',e.target.value)}/></label>
++      <div className="builder-two"><label className="cr-label">🧩 Target vocabulary<textarea className="cr-input cr-textarea" value={joinList(draft.target_vocab)} onChange={e=>change('target_vocab',e.target.value)}/></label><label className="cr-label">💬 Target patterns<textarea className="cr-input cr-textarea" value={joinList(draft.target_patterns)} onChange={e=>change('target_patterns',e.target.value)}/></label></div>
++      <div className="builder-two"><label className="cr-label">Toki mở đầu (English)<textarea className="cr-input cr-textarea small" value={draft.opening_en||''} onChange={e=>change('opening_en',e.target.value)}/></label><label className="cr-label">Bản dịch hỗ trợ<textarea className="cr-input cr-textarea small" value={draft.opening_vi||''} onChange={e=>change('opening_vi',e.target.value)}/></label></div>
++      <details className="advanced"><summary>Thiết lập AI nâng cao</summary><div className="cr-form" style={{marginTop:12}}><label className="cr-label">AI role<input className="cr-input" value={draft.ai_role||''} onChange={e=>change('ai_role',e.target.value)}/></label><label className="cr-label">Scene prompt<textarea className="cr-input cr-textarea" value={draft.scene_prompt||''} onChange={e=>change('scene_prompt',e.target.value)}/></label><div className="builder-three"><label className="cr-label">Target turns<input className="cr-input" type="number" min="3" max="14" value={draft.target_turns||6} onChange={e=>change('target_turns',e.target.value)}/></label><label className="cr-label">Speaking target (giây)<input className="cr-input" type="number" min="20" max="300" value={draft.target_speaking_seconds||60} onChange={e=>change('target_speaking_seconds',e.target.value)}/></label><label className="cr-label">Difficulty<select className="cr-select" value={draft.difficulty||2} onChange={e=>change('difficulty',e.target.value)}><option value="1">1 — dễ</option><option value="2">2 — vừa</option><option value="3">3 — nâng cao</option></select></label></div></div></details>
++      {draft.teacher_rationale_vi&&<div className="teacher-insight"><b>Vì sao AI thiết kế như vậy?</b><div className="cr-muted" style={{marginTop:6}}>{draft.teacher_rationale_vi}</div></div>}
++      <div className="cr-row builder-actions"><button className="cr-btn" disabled={saving} onClick={()=>save(true)}>{saving?'Đang lưu…':'🚀 Lưu & giao bài'}</button><button className="cr-btn secondary" disabled={saving} onClick={()=>save(false)}>Lưu vào thư viện</button><button className="cr-btn ghost" disabled={saving||generating} onClick={generate}>↻ Generate lại</button></div>
++    </div>}
++  </div>
++}
+ 
+ function AddStudent({token,classId,onAdded}){const [name,setName]=useState('');const [code,setCode]=useState('');const [pin,setPin]=useState(()=>String(Math.floor(1000+Math.random()*9000)));const [msg,setMsg]=useState('');const submit=async e=>{e.preventDefault();try{const d=await request(`/api/classroom/classes/${classId}/students`,{token,method:'POST',body:{displayName:name,studentCode:code,pin}});setMsg(`Đã tạo ${d.item.display_name}: ${d.item.student_code} / PIN ${pin}`);setName('');setCode('');setPin(String(Math.floor(1000+Math.random()*9000)));onAdded();}catch(x){setMsg(x.message)}};return <form className="cr-form" onSubmit={submit}><input className="cr-input" placeholder="Tên học sinh" value={name} onChange={e=>setName(e.target.value)}/><div className="cr-row"><input className="cr-input" style={{flex:1}} placeholder="Mã HS (để trống = tự tạo)" value={code} onChange={e=>setCode(e.target.value)}/><input className="cr-input" style={{width:105}} value={pin} onChange={e=>setPin(e.target.value.replace(/\D/g,'').slice(0,6))}/></div><button className="cr-btn">+ Thêm học sinh</button>{msg&&<div className={msg.startsWith('Đã')?'cr-success':'cr-error'}>{msg}</div>}</form>}
+ 
+-function AssignMission({token,classId,missions,onAssigned}){const [missionId,setMissionId]=useState('');const [msg,setMsg]=useState('');useEffect(()=>{if(!missionId&&missions[0])setMissionId(missions[0].id)},[missions]);const submit=async e=>{e.preventDefault();try{await request('/api/classroom/assignments',{token,method:'POST',body:{classId,missionId}});setMsg('Đã giao bài cho lớp.');onAssigned();}catch(x){setMsg(x.message)}};return <form className="cr-form" onSubmit={submit}><select className="cr-select" value={missionId} onChange={e=>setMissionId(e.target.value)}>{missions.map(m=><option key={m.id} value={m.id}>{m.title} · {m.mission_type}</option>)}</select><button className="cr-btn" disabled={!missionId}>Giao bài</button>{msg&&<div className={msg.startsWith('Đã')?'cr-success':'cr-error'}>{msg}</div>}</form>}
++function AssignMission({token,classId,missions,onAssigned}){const [missionId,setMissionId]=useState('');const [msg,setMsg]=useState('');useEffect(()=>{if(!missionId&&missions[0])setMissionId(missions[0].id)},[missions]);const submit=async e=>{e.preventDefault();try{await request('/api/classroom/assignments',{token,method:'POST',body:{classId,missionId}});setMsg('Đã giao bài cho lớp.');onAssigned();}catch(x){setMsg(x.message)}};return <form className="cr-form" onSubmit={submit}><select className="cr-select" value={missionId} onChange={e=>setMissionId(e.target.value)}>{missions.map(m=><option key={m.id} value={m.id}>{m.center_id?'⭐ Tự tạo':'Mẫu'} · {m.title} · {m.mission_type}</option>)}</select><button className="cr-btn secondary" disabled={!missionId}>Giao mission đã lưu</button>{msg&&<div className={msg.startsWith('Đã')?'cr-success':'cr-error'}>{msg}</div>}</form>}
+ 
+ function ResultsPanel({data,onClose}){
+-  const items=data.items||[];
+-  const completed=items.filter(x=>x.status==='completed').length;
+-  const totalSpeaking=items.reduce((n,x)=>n+Number(x.actual_speaking_seconds||0),0);
+-  const practiced=items.filter(x=>Number(x.turn_count||0)>0).length;
+-  const targetVocabTotal=(data.assignment.target_vocab||[]).length;
+-  const targetPatternsTotal=(data.assignment.target_patterns||[]).length;
+-  return <div className="cr-card" style={{marginTop:18}}>
+-    <div className="cr-top"><div><h2>{data.assignment.title}</h2><p className="cr-muted">Kết quả assignment · {data.assignment.learning_objective}</p></div><button className="cr-btn secondary" onClick={onClose}>Đóng</button></div>
+-    <div className="teacher-insight"><b>Class Insight</b><div className="cr-row" style={{marginTop:10}}><span className="cr-pill">✅ {completed}/{items.length} hoàn thành</span><span className="cr-pill">🎙 {Math.round(totalSpeaking/60)} phút nói</span><span className="cr-pill">💬 {practiced}/{items.length} đã luyện</span></div></div>
+-    <table className="cr-table"><thead><tr><th>Học sinh</th><th>Trạng thái</th><th>Speaking</th><th>Target</th><th>Stars</th><th>AI note</th></tr></thead><tbody>{items.map(x=>{const sum=x.summary||{};return <tr key={x.student_id}><td><b>{x.display_name}</b><div className="coverage">{x.turn_count||0} lượt</div></td><td>{x.status||'Chưa làm'}</td><td>{x.actual_speaking_seconds?`${Math.floor(x.actual_speaking_seconds/60)}:${String(x.actual_speaking_seconds%60).padStart(2,'0')}`:'—'}</td><td><div className="coverage">🧩 {(x.target_vocab_used||[]).length}/{targetVocabTotal}</div><div className="coverage">💬 {(x.target_patterns_used||[]).length}/{targetPatternsTotal}</div></td><td>{x.stars?'⭐'.repeat(x.stars):'—'}</td><td className="teacher-note">{sum.teacherNoteVi||sum.teacher_note_vi||'—'}</td></tr>})}</tbody></table>
+-  </div>
++  const items=data.items||[]; const completed=items.filter(x=>x.status==='completed').length; const totalSpeaking=items.reduce((n,x)=>n+Number(x.actual_speaking_seconds||0),0); const practiced=items.filter(x=>Number(x.turn_count||0)>0).length; const targetVocabTotal=(data.assignment.target_vocab||[]).length; const targetPatternsTotal=(data.assignment.target_patterns||[]).length;
++  return <div className="cr-card" style={{marginTop:18}}><div className="cr-top"><div><h2>{data.assignment.title}</h2><p className="cr-muted">Kết quả assignment · {data.assignment.learning_objective}</p></div><button className="cr-btn secondary" onClick={onClose}>Đóng</button></div><div className="teacher-insight"><b>Class Insight</b><div className="cr-row" style={{marginTop:10}}><span className="cr-pill">✅ {completed}/{items.length} hoàn thành</span><span className="cr-pill">🎙 {Math.round(totalSpeaking/60)} phút nói</span><span className="cr-pill">💬 {practiced}/{items.length} đã luyện</span></div></div><table className="cr-table"><thead><tr><th>Học sinh</th><th>Trạng thái</th><th>Speaking</th><th>Target</th><th>Stars</th><th>AI note</th></tr></thead><tbody>{items.map(x=>{const sum=x.summary||{};return <tr key={x.student_id}><td><b>{x.display_name}</b><div className="coverage">{x.turn_count||0} lượt</div></td><td>{x.status||'Chưa làm'}</td><td>{x.actual_speaking_seconds?`${Math.floor(x.actual_speaking_seconds/60)}:${String(x.actual_speaking_seconds%60).padStart(2,'0')}`:'—'}</td><td><div className="coverage">🧩 {(x.target_vocab_used||[]).length}/{targetVocabTotal}</div><div className="coverage">💬 {(x.target_patterns_used||[]).length}/{targetPatternsTotal}</div></td><td>{x.stars?'⭐'.repeat(x.stars):'—'}</td><td className="teacher-note">{sum.teacherNoteVi||sum.teacher_note_vi||'—'}</td></tr>})}</tbody></table></div>
+ }
+-

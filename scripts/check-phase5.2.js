@@ -1,0 +1,38 @@
+const fs = require('fs');
+const assert = require('assert');
+const read = p => fs.readFileSync(p, 'utf8');
+
+const app = read('apps/education/src/App.jsx');
+const student = read('apps/education/src/student/StudentApp.jsx');
+const teacher = read('apps/education/src/teacher/TeacherApp.jsx');
+const roster = read('apps/education/src/teacher/StudentRosterTools.jsx');
+const builder = read('apps/education/src/teacher/MissionBuilder.jsx');
+const parent = read('apps/education/src/reports/ParentReport.jsx');
+const speaking = read('apps/speaking/src/consumer/ConsumerApp.jsx');
+const server = read('backend/server.js');
+const cdb = read('backend/classroom/classroomDb.js');
+const pilot = read('backend/classroom/pilotMetrics.js');
+
+assert(app.includes("path.startsWith('/join/')"), 'Education join route missing');
+assert(student.includes("loginSource:prefilled?'join_link':'manual'"), 'Join-link login source missing');
+assert(student.includes("m.ageBand==='kids'?3:5"), 'Kids must show max 3 target vocab hints');
+assert(student.includes("'Kết thúc sớm'"), 'Early finish label missing');
+assert(student.includes('Toki đang nghe…'), 'Education mic processing label missing');
+assert(roster.includes('/students/bulk'), 'Bulk roster UI missing');
+assert(roster.includes('In / Lưu PDF'), 'Printable login cards missing');
+assert(teacher.includes('reset-pin'), 'Existing-student login-card reset missing');
+assert(builder.includes('Tuỳ chọn nâng cao'), 'Mission quick-mode advanced disclosure missing');
+assert(builder.includes('✨ Tạo mission'), 'Quick mission CTA missing');
+assert(teacher.includes('TeacherOnboardingChecklist'), 'Teacher onboarding checklist missing');
+assert(teacher.includes('Sao chép tin nhắn nhắc'), 'Actionable reminder missing');
+assert(parent.indexOf('parent-lead') < parent.indexOf('report-metrics'), 'Parent message must lead before metrics');
+assert(speaking.includes('Luyện NÓI tiếng Anh với Toki — không sợ sai.'), 'Speaking value proposition missing');
+assert(speaking.includes('bigmic ${recording ? "on" : ""} ${(loading || sttBusy) ? "processing" : ""}'), 'Speaking processing mic state missing');
+assert(server.includes('/students/bulk'), 'Bulk student endpoint missing');
+assert(server.includes('/reset-pin'), 'PIN reset endpoint missing');
+assert(server.includes("student_login_success"), 'Student login UX telemetry missing');
+assert(cdb.includes('createStudentsBulk'), 'Transactional bulk create missing');
+assert(!cdb.includes('pin_plaintext'), 'Plaintext PIN column must not exist');
+assert(pilot.includes('pilot_ux_events'), 'Pilot UX event table missing');
+assert(pilot.includes('medianTimeToFirstAssignmentSeconds'), 'Time-to-first-assignment metric missing');
+console.log('Phase 5.2 pilot UX checks passed: friction / kids / mic / parent / analytics');

@@ -1,120 +1,153 @@
-# Chạy thử Dám Nói trên máy (local) — hướng dẫn chi tiết
+# Chạy local Dám Nói Phase 5.1 — 2 app, 1 backend
 
-Bạn sẽ chạy 2 thứ cùng lúc, trong **2 cửa sổ Terminal**:
-- **Backend** (cổng 8787) — giữ API key, gọi Claude, lưu dữ liệu.
-- **Frontend** (cổng 5173) — giao diện, gọi sang backend.
+Phase 5.1 tách sản phẩm thành hai frontend độc lập:
 
-Frontend gọi `/api/...`, Vite tự chuyển tiếp sang backend, nên key KHÔNG bao giờ lộ ra trình duyệt.
+- **Dám Nói — Speaking Practice**: `apps/speaking` — B2C, port `5173`.
+- **Dám Nói Education**: `apps/education` — trung tâm/teacher/student/parent report, port `5174`.
+- **Shared backend**: `backend` — Claude + Azure + PostgreSQL/Supabase, port `8787`.
 
----
+Không còn thư mục `frontend/` hỗn hợp như Phase 4.1.
 
-## 0. Chuẩn bị (làm 1 lần)
+## 1. Backend
 
-**a) Cài Node.js (>= 18).** Tải bản LTS ở https://nodejs.org. Kiểm tra:
-```bash
-node -v        # ví dụ v20.x
-npm -v
-```
-
-**b) Lấy Anthropic API key.** Vào https://console.anthropic.com → API Keys → tạo key (dạng `sk-ant-...`). Cần nạp một ít credit để gọi được model.
-
-**c) Lấy 2 thư mục này về cùng một chỗ**, ví dụ:
-```
-damnoi/
-  backend/     (server.js, db.js, prompt.js, package.json, README.md)
-  frontend/    (index.html, vite.config.js, package.json, src/...)
-```
-
----
-
-## 1. Chạy BACKEND (cửa sổ Terminal #1)
+Tạo env:
 
 ```bash
-cd damnoi/backend
-npm install
+cd backend
+cp .env.example .env
 ```
-> `better-sqlite3` cần biên dịch — nếu báo lỗi build, xem mục Khắc phục sự cố bên dưới.
 
-Khởi động server, gắn API key vào ngay câu lệnh:
+Điền key/DB thật. Với Supabase, dùng connection string thật từ Dashboard; không để placeholder `localhost`.
 
-**macOS / Linux:**
+Local startup:
+
 ```bash
-ANTHROPIC_API_KEY=sk-ant-... node server.js
-```
-**Windows (PowerShell):**
-```powershell
-$env:ANTHROPIC_API_KEY="sk-ant-..."; node server.js
+npm ci
+npm run start:local
 ```
 
-Thấy dòng này là OK:
-```
+`start:local` dùng `node --env-file=.env server.js`, nên `.env` được load tự động.
+
+Backend OK khi thấy:
+
+```text
 Dám Nói backend on http://localhost:8787
 ```
-**Để nguyên cửa sổ này chạy**, mở cửa sổ Terminal mới cho frontend.
 
-### Kiểm tra nhanh backend bằng curl (không bắt buộc)
+Health check:
+
 ```bash
-# 1) Mở một buổi mới — lấy greeting + streak
-curl -s -X POST http://localhost:8787/api/session/start \
-  -H "Content-Type: application/json" -d '{}'
-
-# 2) Thử một lượt nói qua endpoint test (không cần userId)
-curl -s -X POST http://localhost:8787/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"[SESSION_START] [TOPIC: Free talk]"},{"role":"assistant","content":"Hi! I am Toki. How are you today?"},{"role":"user","content":"I fine. I go to work today"}]}'
+curl http://localhost:8787/api/health
 ```
-Lượt 2 trả về JSON có `spoken_reply`, `vi_translation`, `scaffold_chips`, `errors_noticed`...
-Nếu thấy JSON đó → backend + Claude chạy ngon.
 
----
+## 2. Speaking Practice
 
-## 2. Chạy FRONTEND (cửa sổ Terminal #2)
+Terminal mới:
 
 ```bash
-cd damnoi/frontend
-npm install
+cd apps/speaking
+cp .env.example .env
+npm ci
 npm run dev
 ```
-Thấy dòng `Local: http://localhost:5173/` → mở link đó trong **Chrome** (Chrome hỗ trợ mic tốt nhất).
 
-Giờ bạn có thể: bấm Bắt đầu → chọn chủ đề → nói (bấm mic) hoặc gõ. Mỗi câu của Toki có nút Nghe lại / Dịch, có nút Xong để xem màn kết thúc.
+Mở:
 
-> Mic chỉ chạy trên `http://localhost` (được coi là an toàn) hoặc HTTPS. Nếu trình duyệt không hỗ trợ, cứ gõ chữ — đầy đủ tính năng.
-
----
-
-## 3. Thử "đường dây nóng" tiếng Việt & các ca khó
-Gõ thử để xem cơ chế hoạt động:
-- `On weekend I go to... cửa hàng tiện lợi` → Toki cấp từ tiếng Anh, đi tiếp.
-- `tôi dở quá` → Toki trấn an, hạ chuẩn, đưa một việc nhỏ dễ.
-- Để yên ~27 giây không nhập gì → Toki tự thả "phao" theo nấc thang.
-- Nói một tràng dài, nhiều lỗi → Toki khen "nói liền mạch", không sửa giữa chừng; lỗi nằm im trong nút Xem lại.
-
----
-
-## Khắc phục sự cố
-
-- **`npm install` ở backend lỗi build `better-sqlite3`:** cần công cụ biên dịch.
-  - macOS: `xcode-select --install`
-  - Windows: cài "Desktop development with C++" (Visual Studio Build Tools), rồi `npm install` lại.
-  - Ngại cài? Tạm thời có thể bỏ phần lưu DB và chỉ dùng endpoint `/api/chat` (không đụng tới `db.js`) để test giao diện — nói mình biết, mình tách ra cho.
-- **Frontend chạy nhưng Toki không trả lời / lỗi "api":** kiểm tra Terminal #1 còn chạy không, và bạn đã gắn `ANTHROPIC_API_KEY` đúng chưa. Xem log lỗi ở cửa sổ backend.
-- **`429` hoặc lỗi credit:** tài khoản Anthropic chưa có credit hoặc bị giới hạn tần suất.
-- **CORS / không gọi được /api:** đảm bảo bạn mở `http://localhost:5173` (không phải mở file index.html trực tiếp), vì proxy nằm trong Vite dev server.
-- **Mic không bật:** dùng Chrome, cho phép quyền micro, và phải là `localhost`.
-
----
-
-## Sơ đồ luồng
-```
-Trình duyệt (5173)
-   │  fetch("/api/chat", {messages})
-   ▼
-Vite dev proxy  ──►  Backend (8787)  ──►  Claude API
-                       (giữ API key)
+```text
+http://localhost:5173
 ```
 
-## Khi muốn lên bản "thật" hơn
-Endpoint `/api/chat` là bản test không lưu gì. Khi cần streak/lịch sử thật, đổi frontend
-sang dùng `/api/session/start` + `/api/turn` + `/api/review` (đã có sẵn trong `server.js`,
-mô tả trong `backend/README.md`).
+Đây chỉ là app consumer. Không có Teacher/Student/Parent routes.
+
+## 3. Dám Nói Education
+
+Terminal thứ ba:
+
+```bash
+cd apps/education
+cp .env.example .env
+npm ci
+npm run dev
+```
+
+Mở:
+
+```text
+http://localhost:5174
+```
+
+Routes:
+
+```text
+http://localhost:5174/           Education landing
+http://localhost:5174/teacher   Teacher portal
+http://localhost:5174/student   Student portal
+http://localhost:5174/report/... Parent report
+```
+
+## 4. Chạy từ root
+
+Sau khi đã `npm ci` trong từng app/backend, có thể dùng helper scripts:
+
+```bash
+npm run start:backend
+npm run dev:speaking
+npm run dev:education
+```
+
+Mỗi command chạy ở một Terminal riêng.
+
+## 5. Supabase sanity check
+
+Trước khi start backend, kiểm tra Node đang đọc đúng `.env`:
+
+```bash
+cd backend
+node --env-file=.env -e '
+const u=new URL(process.env.DATABASE_URL);
+console.log("DB host:",u.hostname);
+console.log("DB port:",u.port);
+console.log("PGSSL:",process.env.PGSSL);
+console.log("AUTH_SECRET:",process.env.AUTH_SECRET && !process.env.AUTH_SECRET.startsWith("replace-") ? "✅" : "❌");
+console.log("ADMIN_KEY:",process.env.ADMIN_KEY && !process.env.ADMIN_KEY.startsWith("replace-") ? "✅" : "❌");
+'
+```
+
+Nếu bạn dùng Supabase mà `DB host` vẫn là `localhost`, bạn đang sửa nhầm `.env` hoặc chưa thay placeholder.
+
+## 6. Google OAuth local origins
+
+Nếu Teacher Google Login được dùng local, Google OAuth client cần cho phép JavaScript origin:
+
+```text
+http://localhost:5173
+http://localhost:5174
+```
+
+Production cần thêm origin của cả Speaking và Education.
+
+## 7. Optional production CORS
+
+Backend mặc định vẫn allow-all nếu `CORS_ORIGINS` để trống để không phá deploy cũ.
+
+Khi production ổn định, nên set:
+
+```env
+CORS_ORIGINS=https://<speaking-domain>,https://<education-domain>
+```
+
+## 8. Build riêng
+
+```bash
+npm run build:speaking
+npm run build:education
+```
+
+Hoặc chạy trong từng app:
+
+```bash
+cd apps/speaking && npm run build
+cd apps/education && npm run build
+```
+
+Mỗi app tạo `dist/` riêng.

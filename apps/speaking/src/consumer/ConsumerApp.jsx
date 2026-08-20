@@ -412,16 +412,31 @@ async function apiVocab(userId) {
   return Array.isArray(r.items) ? r.items : [];
 }
 
-// Send recorded audio (base64) to the backend Azure STT. Returns the raw transcript.
-async function apiSTT(base64, contentType) {
+// Send recorded audio to backend Azure STT. The backend is the single STT
+// source of truth and also returns confidence so uncertain recognition never
+// gets mistaken for a learner error.
+async function apiSTT(base64, contentType, { userId, sessionId } = {}) {
   const res = await fetch(`${API}/api/stt`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ audio: base64, contentType }),
+    body: JSON.stringify({ audio: base64, contentType, userId, sessionId }),
   });
-  if (!res.ok) throw new Error("stt");
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    const err = new Error(detail.error || "stt");
+    err.code = detail.code || `http_${res.status}`;
+    throw err;
+  }
   const r = await res.json();
-  return (r.text || "").trim();
+  const hasConfidence = r.confidence !== null && r.confidence !== undefined && r.confidence !== "";
+  const hasThreshold = r.threshold !== null && r.threshold !== undefined && r.threshold !== "";
+  return {
+    text: String(r.text || "").trim(),
+    confidence: hasConfidence && Number.isFinite(Number(r.confidence)) ? Number(r.confidence) : null,
+    lowConfidence: !!r.lowConfidence,
+    threshold: hasThreshold && Number.isFinite(Number(r.threshold)) ? Number(r.threshold) : null,
+    status: r.status || "Unknown",
+  };
 }
 
 async function apiProgress(userId) {
@@ -589,10 +604,16 @@ const STYLE = `
 .inbar{padding:12px 16px 16px;border-top:1px solid var(--line);background:var(--paper);display:flex;flex-direction:column;gap:10px;}
 .micwrap{display:flex;align-items:center;justify-content:center;gap:14px;}
 .bigmic{width:74px;height:74px;border-radius:50%;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#fff;background:var(--green);box-shadow:0 14px 30px -10px rgba(47,143,115,.8);transition:.16s;position:relative;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:none;}
-.bigmic:hover:not(:disabled){background:var(--green-d);transform:scale(1.04);}
-.bigmic:disabled{opacity:.45;cursor:default;}
+.bigmic{background:var(--coral);}
+.bigmic:hover:not(:disabled){background:#e84d2d;transform:scale(1.04);}
+.bigmic:disabled{cursor:default;}
 .bigmic.on{background:var(--coral);box-shadow:0 14px 30px -8px rgba(221,115,80,.8);}
 .bigmic.on:before{content:"";position:absolute;inset:-7px;border-radius:50%;border:3px solid #DD735055;animation:ring 1.2s ease-out infinite;}
+.bigmic.processing{background:#6f6978!important;box-shadow:none!important;opacity:1!important;}
+.micspinner{width:22px;height:22px;border:3px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;animation:micspin .8s linear infinite;}
+.mictip{margin:0 auto 2px;max-width:260px;padding:9px 12px;border-radius:12px;background:#fff3ee;color:#ff7b5c;font-weight:800;font-size:12.5px;text-align:center;position:relative;}
+.mictip:after{content:"";position:absolute;left:50%;bottom:-6px;width:12px;height:12px;background:#fff3ee;transform:translateX(-50%) rotate(45deg);}
+@keyframes micspin{to{transform:rotate(360deg)}}
 @keyframes ring{0%{transform:scale(1);opacity:.9}100%{transform:scale(1.35);opacity:0}}
 .mhint{font-size:12.5px;color:var(--muted);font-weight:700;text-align:center;}
 .limitbox{text-align:center;padding:10px 14px;}
@@ -688,8 +709,10 @@ export default function App() {
   const [input, setInput] = useState("");
   const [ttsOn, setTtsOn] = useState(true);
   const [slow, setSlow] = useState(false);
-  const [listening, setListening] = useState(false);
   const [micError, setMicError] = useState("");
+  const [showMicTip, setShowMicTip] = useState(() => {
+    try { return localStorage.getItem('damnoi_seen_mic_tip') !== '1'; } catch { return true; }
+  });
   const [showReview, setShowReview] = useState(false);
   const [showVocab, setShowVocab] = useState(false);
   const [vocabItems, setVocabItems] = useState([]);
@@ -698,7 +721,8 @@ export default function App() {
   const [progress, setProgress] = useState(null);
   const [showBrag, setShowBrag] = useState(false);
   const [revealed, setRevealed] = useState({}); // msgIndex -> bool
-  const [elapsed, setElapsed] = useState(0);
+  const [elapsed, setElapsed] = useState(0); // total time on the chat screen
+  const [actualSpokenSeconds, setActualSpokenSeconds] = useState(0);
   const [words, setWords] = useState(0);
   const [streak, setStreak] = useState(1);
   const [starting, setStarting] = useState(false);
@@ -724,20 +748,23 @@ export default function App() {
   const chunksRef = useRef([]);
   const streamRef = useRef(null);
   const recordStartRef = useRef(0);
+  const pendingRecordSecondsRef = useRef(0);
   const typingRef = useRef(false);
   useEffect(() => { typingRef.current = typing; }, [typing]);
   const sessionRef = useRef({ userId: null, sessionId: null });
-  const lastSpokeRef = useRef(Date.now()); // to measure seconds spoken per turn
 
   const feedRef = useRef(null);
   const silenceRef = useRef({ count: 0, timer: null });
-  const recogRef = useRef(null);
   const ttsRef = useRef(true), slowRef = useRef(false);
   useEffect(() => { ttsRef.current = ttsOn; }, [ttsOn]);
   useEffect(() => { slowRef.current = slow; }, [slow]);
 
-  const sttSupported = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
-  useEffect(() => { if (!sttSupported) setTyping(true); }, [sttSupported]);
+  // Phase 0: browser Web Speech is no longer part of the primary path.
+  // MediaRecorder + getUserMedia records audio and Azure on the backend transcribes it.
+  const micSupported = typeof window !== "undefined"
+    && !!navigator.mediaDevices?.getUserMedia
+    && typeof window.MediaRecorder !== "undefined";
+  useEffect(() => { if (!micSupported) setTyping(true); }, [micSupported]);
 
   const pickVoice = () => {
     const all = window.speechSynthesis.getVoices();
@@ -951,7 +978,12 @@ export default function App() {
       setUi((p) => [...p, { who: "scene", text: opts.sceneLabel }]);
     } else if (!opts.silent) {
       silenceRef.current.count = 0;
-      secondsSpoken = Math.min(120, Math.round((Date.now() - lastSpokeRef.current) / 1000));
+      // Voice turns provide their true recording duration. Typed/chip turns are 0.
+      const measured = Number(opts.secondsSpoken || 0);
+      secondsSpoken = Number.isFinite(measured) && measured > 0
+        ? Math.max(1, Math.min(120, Math.round(measured)))
+        : 0;
+      if (secondsSpoken > 0) setActualSpokenSeconds((v) => v + secondsSpoken);
       setUi((p) => [...p, { who: "u", text: content }]);
       setWords((w) => w + content.trim().split(/\s+/).filter(Boolean).length);
     }
@@ -991,10 +1023,10 @@ export default function App() {
       const fbEn = "Hmm, say that again for me?";
       setUi((p) => [...p, { who: "t", roast: "", en: fbEn, vi: "" }]);
       speakEn(fbEn);
-    } finally { setLoading(false); lastSpokeRef.current = Date.now(); armSilence(); }
+    } finally { setLoading(false); armSilence(); }
   }, [speakEn, armSilence, stopAllSpeech]);
 
-  const handleSend = (text) => { const t = (text != null ? text : input).trim(); if (!t || loading) return; setInput(""); sendTurn(t); };
+  const handleSend = (text, opts = {}) => { const t = (text != null ? text : input).trim(); if (!t || loading) return; setInput(""); sendTurn(t, opts); };
   const startScene = (s) => { if (loading) return; sendTurn(`[SCENE: ${s.scene}]`, { scene: true, sceneLabel: s.vi }); };
 
   // Called by Google with the signed credential after the user picks an account.
@@ -1036,10 +1068,9 @@ export default function App() {
     setTopic(tp); setScreen("chat");
     const { opener, openerVi } = pickOpener(tp);
     setUi([{ who: "t", text: opener, vi: openerVi }]);
-    setChips([]); setErrors([]); setErrorCount(0); setRevealed({}); setElapsed(0); setWords(0);
+    setChips([]); setErrors([]); setErrorCount(0); setRevealed({}); setElapsed(0); setActualSpokenSeconds(0); setWords(0);
     setStarters(tp.starters || []); setShowStarters((tp.starters || []).length > 0);
     silenceRef.current.count = 0;
-    lastSpokeRef.current = Date.now();
     try {
       const s = await apiStartSession(tp.seed, opener);
       sessionRef.current = { userId: s.userId, sessionId: s.sessionId };
@@ -1088,88 +1119,19 @@ export default function App() {
   };
 
   const copyBrag = () => {
-    const cap = `Mình vừa "dám nói" tiếng Anh ${mmss} phút với Toki 🔥 ${errorCount} lần bị khịa sấp mặt mà vẫn sống 😎 Thử đi: Dám Nói app #DamNoi #hoctienganh`;
+    const cap = `Mình vừa "dám nói" tiếng Anh ${speakingMmss} với Toki 🔥 ${errorCount} lần bị khịa sấp mặt mà vẫn sống 😎 Thử đi: Dám Nói app #DamNoi #hoctienganh`;
     try { navigator.clipboard.writeText(cap); } catch {}
   };
 
   const leave = () => { clearSilence(); stopAllSpeech(); clearTtsCache(); setScreen("home"); };
   const finish = () => {
-    clearSilence(); stopAllSpeech(); clearTtsCache(); setListening(false); setScreen("finish");
+    clearSilence(); stopAllSpeech(); clearTtsCache(); setScreen("finish");
     // mark that the user has spoken today so we don't show the urgency banner
     try { localStorage.setItem("moho_spoke_date", new Date().toISOString().slice(0, 10)); } catch {}
     setSpokeToday(true);
   };
 
-  const micErrMsg = (code) => ({
-    "not-allowed": "Micro bị chặn. Mở System Settings › Privacy & Security › Microphone, bật cho Chrome, rồi tải lại trang.",
-    "service-not-allowed": "Micro bị chặn ở cấp hệ thống. Bật cho Chrome trong System Settings › Privacy & Security › Microphone.",
-    "audio-capture": "Không tìm thấy micro. Kiểm tra thiết bị thu âm của máy.",
-    "network": "Nhận giọng nói cần Internet (Chrome gửi lên dịch vụ Google). Kiểm tra mạng / VPN / tường lửa.",
-    "no-speech": "Chưa nghe thấy gì — thử nói to hơn một chút nhé.",
-    "aborted": "",
-  }[code] ?? `Micro lỗi (${code}). Cứ gõ chữ bên dưới cũng được nhé.`);
-
-  const transcriptRef = useRef("");
-  const interimRef = useRef("");
-  const holdingRef = useRef(false);
-
-  const startHold = () => {
-    if (!sttSupported) { setMicError("Trình duyệt này không hỗ trợ nhận giọng nói. Hãy dùng Chrome, hoặc gõ chữ bên dưới."); return; }
-    if (loading || holdingRef.current) return;
-    setMicError("");
-    transcriptRef.current = "";
-    holdingRef.current = true;
-    try {
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      const rec = new SR();
-      rec.lang = "en-US";
-      rec.continuous = true;       // don't auto-stop on a pause
-      rec.interimResults = true;   // keep capturing while held
-      rec.maxAlternatives = 1;
-      interimRef.current = "";
-      rec.onstart = () => setListening(true);
-      rec.onresult = (e) => {
-        let finalText = "", interimText = "";
-        for (let i = 0; i < e.results.length; i++) {
-          const t = e.results[i][0].transcript;
-          if (e.results[i].isFinal) finalText += t + " ";
-          else interimText += t + " ";
-        }
-        // Browsers (esp. Chrome/Google) auto-"fix" grammar & punctuation in the
-        // FINAL result — e.g. "it not good" becomes "It's not good" — which hides
-        // the learner's real mistake. The INTERIM text is closer to what was
-        // actually said, so we keep the latest interim as the raw fallback.
-        if (interimText.trim()) interimRef.current = interimText.trim();
-        if (finalText.trim()) transcriptRef.current = finalText.trim();
-      };
-      rec.onerror = (e) => {
-        // While held, ignore the harmless "no-speech"/"aborted" so it doesn't cut off.
-        if (holdingRef.current && (e.error === "no-speech" || e.error === "aborted")) return;
-        setListening(false); setMicError(micErrMsg(e.error));
-      };
-      rec.onend = () => {
-        // If still held (browser auto-ended anyway), restart to keep listening.
-        if (holdingRef.current) { try { rec.start(); } catch {} return; }
-        setListening(false);
-      };
-      recogRef.current = rec; rec.start();
-    } catch { holdingRef.current = false; setListening(false); setMicError("Không khởi động được micro. Thử tải lại trang, hoặc gõ chữ bên dưới."); }
-  };
-
-  const endHold = () => {
-    if (!holdingRef.current) return;
-    holdingRef.current = false;
-    setListening(false);
-    try { recogRef.current?.stop(); } catch {}
-    // small delay so the last result lands before we read it
-    setTimeout(() => {
-      // Prefer the RAW interim text (less auto-corrected by the browser). Fall back
-      // to the final only if interim is empty. This keeps the learner's real words.
-      const raw = (interimRef.current || transcriptRef.current || "").trim();
-      transcriptRef.current = ""; interimRef.current = "";
-      if (raw) handleSend(raw);
-    }, 250);
-  };
+  // Web Speech API path removed in Phase 0. Azure STT is authoritative.
 
   // Decode any recorded blob and re-encode as 16kHz mono 16-bit WAV, which Azure
   // STT reliably accepts (webm/opus from the browser is often rejected).
@@ -1217,10 +1179,19 @@ export default function App() {
   };
   const startRecord = async () => {
     if (loading || recording || sttBusy) return;
+    if (!micSupported) {
+      setTyping(true);
+      setMicError("Thiết bị này chưa hỗ trợ ghi âm trong trình duyệt — bạn có thể gõ câu trả lời bên dưới.");
+      return;
+    }
     clearSilence();   // user is actively interacting — cancel any pending silence prompt
     stopAllSpeech();  // and stop any voice currently playing
     unlockAudio();
     setMicError("");
+    if (showMicTip) {
+      setShowMicTip(false);
+      try { localStorage.setItem('damnoi_seen_mic_tip','1'); } catch {}
+    }
     cleanupStream(); // make sure any previous stream is fully released first
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -1232,13 +1203,19 @@ export default function App() {
       chunksRef.current = [];
       rec.ondataavailable = (e) => { if (e.data && e.data.size) chunksRef.current.push(e.data); };
       rec.onstop = async () => {
+        if (maxRecTimerRef.current) { clearTimeout(maxRecTimerRef.current); maxRecTimerRef.current = null; }
         cleanupStream();
         const realMime = rec.mimeType || "audio/mp4";
         const blob = new Blob(chunksRef.current, { type: realMime });
         chunksRef.current = [];
         if (!blob.size) { setSttBusy(false); setRecording(false); return; }
         setSttBusy(true);
-        const t0 = recordStartRef.current;
+        const t0 = Date.now();
+        const recordedSeconds = Math.max(0, Math.min(120,
+          pendingRecordSecondsRef.current || (recordStartRef.current ? (Date.now() - recordStartRef.current) / 1000 : 0)
+        ));
+        recordStartRef.current = 0;
+        pendingRecordSecondsRef.current = 0;
         try {
           let base64, sentType;
           try {
@@ -1257,10 +1234,18 @@ export default function App() {
             });
             sentType = realMime;
           }
-          const text = await apiSTT(base64, sentType);
-          console.log(`[STT] latency ${Date.now() - t0}ms, type ${sentType}, text:`, text);
-          if (text) handleSend(text);
-          else setMicError("Chưa nghe rõ — thử nói lại gần mic hơn nha.");
+          const { userId, sessionId } = sessionRef.current;
+          const stt = await apiSTT(base64, sentType, { userId, sessionId });
+          console.log(`[STT] latency ${Date.now() - t0}ms, type ${sentType}, confidence ${stt.confidence ?? "n/a"}, text:`, stt.text);
+
+          // Hard rule: uncertainty in speech recognition is NOT a learner mistake.
+          // Do not send low-confidence/empty transcripts to Claude; ask for a retry.
+          if (!stt.text || stt.lowConfidence) {
+            const pct = stt.confidence == null ? "" : ` (${Math.round(stt.confidence * 100)}%)`;
+            setMicError(`Toki chưa nghe rõ lắm${pct} — bấm mic nói lại nhé, hoặc gõ chữ bên dưới.`);
+          } else {
+            handleSend(stt.text, { secondsSpoken: recordedSeconds, source: "voice", sttConfidence: stt.confidence });
+          }
         } catch (err) {
           console.error("[STT] error:", err);
           setMicError("Nhận giọng lỗi — thử lại, hoặc gõ chữ bên dưới.");
@@ -1269,15 +1254,19 @@ export default function App() {
           setRecording(false);
         }
       };
-      rec.onerror = () => { cleanupStream(); setRecording(false); setSttBusy(false); setMicError("Lỗi ghi âm — thử lại nha."); };
+      rec.onerror = () => { pendingRecordSecondsRef.current = 0; cleanupStream(); setRecording(false); setSttBusy(false); setMicError("Lỗi ghi âm — thử lại nha."); };
       mediaRecRef.current = rec;
       recordStartRef.current = Date.now();
+      pendingRecordSecondsRef.current = 0;
       rec.start();
       setRecording(true);
       // Safety net: if every stop event somehow misses, never let the mic hang.
       if (maxRecTimerRef.current) clearTimeout(maxRecTimerRef.current);
       maxRecTimerRef.current = setTimeout(() => {
         if (mediaRecRef.current && mediaRecRef.current.state === "recording") {
+          pendingRecordSecondsRef.current = recordStartRef.current
+            ? Math.max(0, Math.min(120, (Date.now() - recordStartRef.current) / 1000))
+            : 0;
           try { mediaRecRef.current.stop(); } catch {}
         }
       }, 30000);
@@ -1292,11 +1281,15 @@ export default function App() {
   const stopRecord = () => {
     if (!recording) return;
     if (maxRecTimerRef.current) { clearTimeout(maxRecTimerRef.current); maxRecTimerRef.current = null; }
+    pendingRecordSecondsRef.current = recordStartRef.current
+      ? Math.max(0, Math.min(120, (Date.now() - recordStartRef.current) / 1000))
+      : 0;
     try { mediaRecRef.current?.stop(); } catch { cleanupStream(); setRecording(false); setSttBusy(false); }
     // recording flag is cleared in onstop/onerror to avoid races
   };
 
-  const mmss = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
+  const sessionMmss = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
+  const speakingMmss = `${String(Math.floor(actualSpokenSeconds / 60)).padStart(2, "0")}:${String(actualSpokenSeconds % 60).padStart(2, "0")}`;
   const roastTopic = FUN_TOPICS.find((t) => t.id === "roast");
   const funTopicsNoRoast = FUN_TOPICS.filter((t) => t.id !== "roast");
 
@@ -1309,9 +1302,10 @@ export default function App() {
           {screen === "welcome" && (
             <div className="welcome">
               <Toki size="lg" />
-              <h1 className="disp">MoHo AI</h1>
-              <p className="tag">Dare to speak</p>
-              <p className="promise disp">"Cứ nói đại.<br/>Đừng sợ sai."</p>
+              <h1 className="disp">Dám Nói</h1>
+              <p className="tag">Speaking Practice</p>
+              <p className="promise disp">Luyện NÓI tiếng Anh với Toki — không sợ sai.</p>
+              <p className="tag">Nói mỗi ngày vài phút, phản xạ lên rõ.</p>
               <button className="cta" onClick={() => setScreen(getJob() ? "home" : "job")}>Bắt đầu</button>
               <p className="fine">Toki nói tiếng Anh · bí từ cứ chêm tiếng Việt</p>
             </div>
@@ -1321,7 +1315,7 @@ export default function App() {
             <div className="welcome">
               <Toki size="md" />
               <h1 className="disp" style={{ fontSize: 30 }}>Bạn là ai nào?</h1>
-              <p className="tag">Để Toki khịa cho đúng "gu" ngành của bạn 😎</p>
+              <p className="tag">Chọn nghề giúp Toki nói đúng tình huống của bạn hơn.</p>
               <div className="jobgrid">
                 {JOBS.map((j) => (
                   <button key={j.id} className="jobcard" onClick={() => { setJob(j.vi); setScreen("home"); }}>
@@ -1469,22 +1463,23 @@ export default function App() {
                   </div>
                 ) : !typing ? (
                   <>
+                    {showMicTip && <div className="mictip">Bấm đây rồi nói tiếng Anh nhé!</div>}
                     <div className="microw">
                       <button className="kbtoggle" title="Gõ chữ (chế độ im lặng)" onClick={() => setTyping(true)}>
                         <Keyboard size={20} />
                       </button>
                       <button
-                        className={`bigmic ${recording ? "on" : ""}`}
+                        className={`bigmic ${recording ? "on" : ""} ${(loading || sttBusy) ? "processing" : ""}`}
                         disabled={loading || sttBusy}
                         title={recording ? "Bấm để dừng và gửi" : "Bấm để nói"}
                         onClick={() => { if (recording) stopRecord(); else startRecord(); }}
                         onContextMenu={(e) => e.preventDefault()}
                       >
-                        <Mic size={30} />
+                        {(loading || sttBusy) ? <span className="micspinner" /> : <Mic size={30} />}
                       </button>
                       <div className="kbspacer" />
                     </div>
-                    <div className="mhint" style={micError ? { color: "var(--coral)" } : undefined}>{micError ? micError : sttBusy ? "Đang nghe bạn nói…" : recording ? "🔴 Đang ghi… bấm lại để gửi" : "Bấm mic để nói — hoặc bấm ⌨ để gõ"}</div>
+                    <div className="mhint" style={micError ? { color: "var(--coral)" } : undefined}>{micError ? micError : (sttBusy || loading) ? "Toki đang nghe…" : recording ? "🔴 Đang ghi… bấm lại để gửi" : "Bấm mic để nói — hoặc bấm ⌨ để gõ"}</div>
                   </>
                 ) : (
                   <div className="typewrap">
@@ -1514,10 +1509,11 @@ export default function App() {
               <h2 className="disp">Tuyệt vời! 🎉</h2>
               <p className="sub">Bạn vừa nói tiếng Anh về cuộc sống thật của mình — phần khó nhất, và bạn đã làm được.</p>
               <div className="stats">
-                <div className="stat g"><div className="n">{mmss}</div><div className="l">Phút nói</div></div>
+                <div className="stat g"><div className="n">{speakingMmss}</div><div className="l">Thời gian nói</div></div>
                 <div className="stat c"><div className="n">{words}</div><div className="l">Từ đã nói</div></div>
                 <div className="stat s"><div className="n">{errorCount}</div><div className="l">Cách nói mới</div></div>
               </div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>Tổng thời gian buổi: {sessionMmss}</div>
               <div className="streakbig streakcelebrate">
                 <span className="streakfire">🔥</span>
                 <span>Chuỗi <strong>{streak} ngày</strong> — đừng để tắt nhé!</span>
@@ -1664,11 +1660,11 @@ export default function App() {
                     <Toki size="sm" />
                     <div>
                       <div className="bragname">Sổ phốt tiếng Anh</div>
-                      <div className="bragsub">by MoHo AI 🔥</div>
+                      <div className="bragsub">by Dám Nói 🔥</div>
                     </div>
                   </div>
                   <div className="bragstats">
-                    <div><b>{mmss}</b><span>phút nói</span></div>
+                    <div><b>{speakingMmss}</b><span>thời gian nói</span></div>
                     <div><b>{words}</b><span>từ</span></div>
                     <div><b>{errorCount}</b><span>lần bị khịa</span></div>
                   </div>

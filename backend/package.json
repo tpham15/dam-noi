@@ -1,12 +1,15 @@
 {
   "name": "damnoi-backend",
   "version": "0.1.0",
-  "description": "Backend for Dám Nói — a fearless English speaking app for Vietnamese learners.",
+  "description": "Shared backend for Dám Nói Speaking Practice and Dám Nói Education.",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test:classroom": "node classroom/classroomPrompt.test.js && node classroom/missionGenerator.test.js && node classroom/reporting.test.js",
+    "start:local": "node --env-file=.env server.js",
+    "dev:local": "node --env-file=.env --watch server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

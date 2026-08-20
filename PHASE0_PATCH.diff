@@ -1,0 +1,539 @@
+--- a/frontend/src/App.jsx
++++ b/frontend/src/App.jsx
+@@ -412,16 +412,31 @@
+   return Array.isArray(r.items) ? r.items : [];
+ }
+ 
+-// Send recorded audio (base64) to the backend Azure STT. Returns the raw transcript.
+-async function apiSTT(base64, contentType) {
++// Send recorded audio to backend Azure STT. The backend is the single STT
++// source of truth and also returns confidence so uncertain recognition never
++// gets mistaken for a learner error.
++async function apiSTT(base64, contentType, { userId, sessionId } = {}) {
+   const res = await fetch(`${API}/api/stt`, {
+     method: "POST",
+     headers: { "Content-Type": "application/json" },
+-    body: JSON.stringify({ audio: base64, contentType }),
++    body: JSON.stringify({ audio: base64, contentType, userId, sessionId }),
+   });
+-  if (!res.ok) throw new Error("stt");
++  if (!res.ok) {
++    const detail = await res.json().catch(() => ({}));
++    const err = new Error(detail.error || "stt");
++    err.code = detail.code || `http_${res.status}`;
++    throw err;
++  }
+   const r = await res.json();
+-  return (r.text || "").trim();
++  const hasConfidence = r.confidence !== null && r.confidence !== undefined && r.confidence !== "";
++  const hasThreshold = r.threshold !== null && r.threshold !== undefined && r.threshold !== "";
++  return {
++    text: String(r.text || "").trim(),
++    confidence: hasConfidence && Number.isFinite(Number(r.confidence)) ? Number(r.confidence) : null,
++    lowConfidence: !!r.lowConfidence,
++    threshold: hasThreshold && Number.isFinite(Number(r.threshold)) ? Number(r.threshold) : null,
++    status: r.status || "Unknown",
++  };
+ }
+ 
+ async function apiProgress(userId) {
+@@ -688,7 +703,6 @@
+   const [input, setInput] = useState("");
+   const [ttsOn, setTtsOn] = useState(true);
+   const [slow, setSlow] = useState(false);
+-  const [listening, setListening] = useState(false);
+   const [micError, setMicError] = useState("");
+   const [showReview, setShowReview] = useState(false);
+   const [showVocab, setShowVocab] = useState(false);
+@@ -698,7 +712,8 @@
+   const [progress, setProgress] = useState(null);
+   const [showBrag, setShowBrag] = useState(false);
+   const [revealed, setRevealed] = useState({}); // msgIndex -> bool
+-  const [elapsed, setElapsed] = useState(0);
++  const [elapsed, setElapsed] = useState(0); // total time on the chat screen
++  const [actualSpokenSeconds, setActualSpokenSeconds] = useState(0);
+   const [words, setWords] = useState(0);
+   const [streak, setStreak] = useState(1);
+   const [starting, setStarting] = useState(false);
+@@ -724,20 +739,23 @@
+   const chunksRef = useRef([]);
+   const streamRef = useRef(null);
+   const recordStartRef = useRef(0);
++  const pendingRecordSecondsRef = useRef(0);
+   const typingRef = useRef(false);
+   useEffect(() => { typingRef.current = typing; }, [typing]);
+   const sessionRef = useRef({ userId: null, sessionId: null });
+-  const lastSpokeRef = useRef(Date.now()); // to measure seconds spoken per turn
+ 
+   const feedRef = useRef(null);
+   const silenceRef = useRef({ count: 0, timer: null });
+-  const recogRef = useRef(null);
+   const ttsRef = useRef(true), slowRef = useRef(false);
+   useEffect(() => { ttsRef.current = ttsOn; }, [ttsOn]);
+   useEffect(() => { slowRef.current = slow; }, [slow]);
+ 
+-  const sttSupported = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+-  useEffect(() => { if (!sttSupported) setTyping(true); }, [sttSupported]);
++  // Phase 0: browser Web Speech is no longer part of the primary path.
++  // MediaRecorder + getUserMedia records audio and Azure on the backend transcribes it.
++  const micSupported = typeof window !== "undefined"
++    && !!navigator.mediaDevices?.getUserMedia
++    && typeof window.MediaRecorder !== "undefined";
++  useEffect(() => { if (!micSupported) setTyping(true); }, [micSupported]);
+ 
+   const pickVoice = () => {
+     const all = window.speechSynthesis.getVoices();
+@@ -951,7 +969,12 @@
+       setUi((p) => [...p, { who: "scene", text: opts.sceneLabel }]);
+     } else if (!opts.silent) {
+       silenceRef.current.count = 0;
+-      secondsSpoken = Math.min(120, Math.round((Date.now() - lastSpokeRef.current) / 1000));
++      // Voice turns provide their true recording duration. Typed/chip turns are 0.
++      const measured = Number(opts.secondsSpoken || 0);
++      secondsSpoken = Number.isFinite(measured) && measured > 0
++        ? Math.max(1, Math.min(120, Math.round(measured)))
++        : 0;
++      if (secondsSpoken > 0) setActualSpokenSeconds((v) => v + secondsSpoken);
+       setUi((p) => [...p, { who: "u", text: content }]);
+       setWords((w) => w + content.trim().split(/\s+/).filter(Boolean).length);
+     }
+@@ -991,10 +1014,10 @@
+       const fbEn = "Hmm, say that again for me?";
+       setUi((p) => [...p, { who: "t", roast: "", en: fbEn, vi: "" }]);
+       speakEn(fbEn);
+-    } finally { setLoading(false); lastSpokeRef.current = Date.now(); armSilence(); }
++    } finally { setLoading(false); armSilence(); }
+   }, [speakEn, armSilence, stopAllSpeech]);
+ 
+-  const handleSend = (text) => { const t = (text != null ? text : input).trim(); if (!t || loading) return; setInput(""); sendTurn(t); };
++  const handleSend = (text, opts = {}) => { const t = (text != null ? text : input).trim(); if (!t || loading) return; setInput(""); sendTurn(t, opts); };
+   const startScene = (s) => { if (loading) return; sendTurn(`[SCENE: ${s.scene}]`, { scene: true, sceneLabel: s.vi }); };
+ 
+   // Called by Google with the signed credential after the user picks an account.
+@@ -1036,10 +1059,9 @@
+     setTopic(tp); setScreen("chat");
+     const { opener, openerVi } = pickOpener(tp);
+     setUi([{ who: "t", text: opener, vi: openerVi }]);
+-    setChips([]); setErrors([]); setErrorCount(0); setRevealed({}); setElapsed(0); setWords(0);
++    setChips([]); setErrors([]); setErrorCount(0); setRevealed({}); setElapsed(0); setActualSpokenSeconds(0); setWords(0);
+     setStarters(tp.starters || []); setShowStarters((tp.starters || []).length > 0);
+     silenceRef.current.count = 0;
+-    lastSpokeRef.current = Date.now();
+     try {
+       const s = await apiStartSession(tp.seed, opener);
+       sessionRef.current = { userId: s.userId, sessionId: s.sessionId };
+@@ -1088,88 +1110,19 @@
+   };
+ 
+   const copyBrag = () => {
+-    const cap = `Mình vừa "dám nói" tiếng Anh ${mmss} phút với Toki 🔥 ${errorCount} lần bị khịa sấp mặt mà vẫn sống 😎 Thử đi: Dám Nói app #DamNoi #hoctienganh`;
++    const cap = `Mình vừa "dám nói" tiếng Anh ${speakingMmss} với Toki 🔥 ${errorCount} lần bị khịa sấp mặt mà vẫn sống 😎 Thử đi: Dám Nói app #DamNoi #hoctienganh`;
+     try { navigator.clipboard.writeText(cap); } catch {}
+   };
+ 
+   const leave = () => { clearSilence(); stopAllSpeech(); clearTtsCache(); setScreen("home"); };
+   const finish = () => {
+-    clearSilence(); stopAllSpeech(); clearTtsCache(); setListening(false); setScreen("finish");
++    clearSilence(); stopAllSpeech(); clearTtsCache(); setScreen("finish");
+     // mark that the user has spoken today so we don't show the urgency banner
+     try { localStorage.setItem("moho_spoke_date", new Date().toISOString().slice(0, 10)); } catch {}
+     setSpokeToday(true);
+   };
+ 
+-  const micErrMsg = (code) => ({
+-    "not-allowed": "Micro bị chặn. Mở System Settings › Privacy & Security › Microphone, bật cho Chrome, rồi tải lại trang.",
+-    "service-not-allowed": "Micro bị chặn ở cấp hệ thống. Bật cho Chrome trong System Settings › Privacy & Security › Microphone.",
+-    "audio-capture": "Không tìm thấy micro. Kiểm tra thiết bị thu âm của máy.",
+-    "network": "Nhận giọng nói cần Internet (Chrome gửi lên dịch vụ Google). Kiểm tra mạng / VPN / tường lửa.",
+-    "no-speech": "Chưa nghe thấy gì — thử nói to hơn một chút nhé.",
+-    "aborted": "",
+-  }[code] ?? `Micro lỗi (${code}). Cứ gõ chữ bên dưới cũng được nhé.`);
+-
+-  const transcriptRef = useRef("");
+-  const interimRef = useRef("");
+-  const holdingRef = useRef(false);
+-
+-  const startHold = () => {
+-    if (!sttSupported) { setMicError("Trình duyệt này không hỗ trợ nhận giọng nói. Hãy dùng Chrome, hoặc gõ chữ bên dưới."); return; }
+-    if (loading || holdingRef.current) return;
+-    setMicError("");
+-    transcriptRef.current = "";
+-    holdingRef.current = true;
+-    try {
+-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+-      const rec = new SR();
+-      rec.lang = "en-US";
+-      rec.continuous = true;       // don't auto-stop on a pause
+-      rec.interimResults = true;   // keep capturing while held
+-      rec.maxAlternatives = 1;
+-      interimRef.current = "";
+-      rec.onstart = () => setListening(true);
+-      rec.onresult = (e) => {
+-        let finalText = "", interimText = "";
+-        for (let i = 0; i < e.results.length; i++) {
+-          const t = e.results[i][0].transcript;
+-          if (e.results[i].isFinal) finalText += t + " ";
+-          else interimText += t + " ";
+-        }
+-        // Browsers (esp. Chrome/Google) auto-"fix" grammar & punctuation in the
+-        // FINAL result — e.g. "it not good" becomes "It's not good" — which hides
+-        // the learner's real mistake. The INTERIM text is closer to what was
+-        // actually said, so we keep the latest interim as the raw fallback.
+-        if (interimText.trim()) interimRef.current = interimText.trim();
+-        if (finalText.trim()) transcriptRef.current = finalText.trim();
+-      };
+-      rec.onerror = (e) => {
+-        // While held, ignore the harmless "no-speech"/"aborted" so it doesn't cut off.
+-        if (holdingRef.current && (e.error === "no-speech" || e.error === "aborted")) return;
+-        setListening(false); setMicError(micErrMsg(e.error));
+-      };
+-      rec.onend = () => {
+-        // If still held (browser auto-ended anyway), restart to keep listening.
+-        if (holdingRef.current) { try { rec.start(); } catch {} return; }
+-        setListening(false);
+-      };
+-      recogRef.current = rec; rec.start();
+-    } catch { holdingRef.current = false; setListening(false); setMicError("Không khởi động được micro. Thử tải lại trang, hoặc gõ chữ bên dưới."); }
+-  };
+-
+-  const endHold = () => {
+-    if (!holdingRef.current) return;
+-    holdingRef.current = false;
+-    setListening(false);
+-    try { recogRef.current?.stop(); } catch {}
+-    // small delay so the last result lands before we read it
+-    setTimeout(() => {
+-      // Prefer the RAW interim text (less auto-corrected by the browser). Fall back
+-      // to the final only if interim is empty. This keeps the learner's real words.
+-      const raw = (interimRef.current || transcriptRef.current || "").trim();
+-      transcriptRef.current = ""; interimRef.current = "";
+-      if (raw) handleSend(raw);
+-    }, 250);
+-  };
++  // Web Speech API path removed in Phase 0. Azure STT is authoritative.
+ 
+   // Decode any recorded blob and re-encode as 16kHz mono 16-bit WAV, which Azure
+   // STT reliably accepts (webm/opus from the browser is often rejected).
+@@ -1217,6 +1170,11 @@
+   };
+   const startRecord = async () => {
+     if (loading || recording || sttBusy) return;
++    if (!micSupported) {
++      setTyping(true);
++      setMicError("Thiết bị này chưa hỗ trợ ghi âm trong trình duyệt — bạn có thể gõ câu trả lời bên dưới.");
++      return;
++    }
+     clearSilence();   // user is actively interacting — cancel any pending silence prompt
+     stopAllSpeech();  // and stop any voice currently playing
+     unlockAudio();
+@@ -1232,13 +1190,19 @@
+       chunksRef.current = [];
+       rec.ondataavailable = (e) => { if (e.data && e.data.size) chunksRef.current.push(e.data); };
+       rec.onstop = async () => {
++        if (maxRecTimerRef.current) { clearTimeout(maxRecTimerRef.current); maxRecTimerRef.current = null; }
+         cleanupStream();
+         const realMime = rec.mimeType || "audio/mp4";
+         const blob = new Blob(chunksRef.current, { type: realMime });
+         chunksRef.current = [];
+         if (!blob.size) { setSttBusy(false); setRecording(false); return; }
+         setSttBusy(true);
+-        const t0 = recordStartRef.current;
++        const t0 = Date.now();
++        const recordedSeconds = Math.max(0, Math.min(120,
++          pendingRecordSecondsRef.current || (recordStartRef.current ? (Date.now() - recordStartRef.current) / 1000 : 0)
++        ));
++        recordStartRef.current = 0;
++        pendingRecordSecondsRef.current = 0;
+         try {
+           let base64, sentType;
+           try {
+@@ -1257,10 +1221,18 @@
+             });
+             sentType = realMime;
+           }
+-          const text = await apiSTT(base64, sentType);
+-          console.log(`[STT] latency ${Date.now() - t0}ms, type ${sentType}, text:`, text);
+-          if (text) handleSend(text);
+-          else setMicError("Chưa nghe rõ — thử nói lại gần mic hơn nha.");
++          const { userId, sessionId } = sessionRef.current;
++          const stt = await apiSTT(base64, sentType, { userId, sessionId });
++          console.log(`[STT] latency ${Date.now() - t0}ms, type ${sentType}, confidence ${stt.confidence ?? "n/a"}, text:`, stt.text);
++
++          // Hard rule: uncertainty in speech recognition is NOT a learner mistake.
++          // Do not send low-confidence/empty transcripts to Claude; ask for a retry.
++          if (!stt.text || stt.lowConfidence) {
++            const pct = stt.confidence == null ? "" : ` (${Math.round(stt.confidence * 100)}%)`;
++            setMicError(`Toki chưa nghe rõ lắm${pct} — bấm mic nói lại nhé, hoặc gõ chữ bên dưới.`);
++          } else {
++            handleSend(stt.text, { secondsSpoken: recordedSeconds, source: "voice", sttConfidence: stt.confidence });
++          }
+         } catch (err) {
+           console.error("[STT] error:", err);
+           setMicError("Nhận giọng lỗi — thử lại, hoặc gõ chữ bên dưới.");
+@@ -1269,15 +1241,19 @@
+           setRecording(false);
+         }
+       };
+-      rec.onerror = () => { cleanupStream(); setRecording(false); setSttBusy(false); setMicError("Lỗi ghi âm — thử lại nha."); };
++      rec.onerror = () => { pendingRecordSecondsRef.current = 0; cleanupStream(); setRecording(false); setSttBusy(false); setMicError("Lỗi ghi âm — thử lại nha."); };
+       mediaRecRef.current = rec;
+       recordStartRef.current = Date.now();
++      pendingRecordSecondsRef.current = 0;
+       rec.start();
+       setRecording(true);
+       // Safety net: if every stop event somehow misses, never let the mic hang.
+       if (maxRecTimerRef.current) clearTimeout(maxRecTimerRef.current);
+       maxRecTimerRef.current = setTimeout(() => {
+         if (mediaRecRef.current && mediaRecRef.current.state === "recording") {
++          pendingRecordSecondsRef.current = recordStartRef.current
++            ? Math.max(0, Math.min(120, (Date.now() - recordStartRef.current) / 1000))
++            : 0;
+           try { mediaRecRef.current.stop(); } catch {}
+         }
+       }, 30000);
+@@ -1292,11 +1268,15 @@
+   const stopRecord = () => {
+     if (!recording) return;
+     if (maxRecTimerRef.current) { clearTimeout(maxRecTimerRef.current); maxRecTimerRef.current = null; }
++    pendingRecordSecondsRef.current = recordStartRef.current
++      ? Math.max(0, Math.min(120, (Date.now() - recordStartRef.current) / 1000))
++      : 0;
+     try { mediaRecRef.current?.stop(); } catch { cleanupStream(); setRecording(false); setSttBusy(false); }
+     // recording flag is cleared in onstop/onerror to avoid races
+   };
+ 
+-  const mmss = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
++  const sessionMmss = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
++  const speakingMmss = `${String(Math.floor(actualSpokenSeconds / 60)).padStart(2, "0")}:${String(actualSpokenSeconds % 60).padStart(2, "0")}`;
+   const roastTopic = FUN_TOPICS.find((t) => t.id === "roast");
+   const funTopicsNoRoast = FUN_TOPICS.filter((t) => t.id !== "roast");
+ 
+@@ -1514,10 +1494,11 @@
+               <h2 className="disp">Tuyệt vời! 🎉</h2>
+               <p className="sub">Bạn vừa nói tiếng Anh về cuộc sống thật của mình — phần khó nhất, và bạn đã làm được.</p>
+               <div className="stats">
+-                <div className="stat g"><div className="n">{mmss}</div><div className="l">Phút nói</div></div>
++                <div className="stat g"><div className="n">{speakingMmss}</div><div className="l">Thời gian nói</div></div>
+                 <div className="stat c"><div className="n">{words}</div><div className="l">Từ đã nói</div></div>
+                 <div className="stat s"><div className="n">{errorCount}</div><div className="l">Cách nói mới</div></div>
+               </div>
++              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>Tổng thời gian buổi: {sessionMmss}</div>
+               <div className="streakbig streakcelebrate">
+                 <span className="streakfire">🔥</span>
+                 <span>Chuỗi <strong>{streak} ngày</strong> — đừng để tắt nhé!</span>
+@@ -1668,7 +1649,7 @@
+                     </div>
+                   </div>
+                   <div className="bragstats">
+-                    <div><b>{mmss}</b><span>phút nói</span></div>
++                    <div><b>{speakingMmss}</b><span>thời gian nói</span></div>
+                     <div><b>{words}</b><span>từ</span></div>
+                     <div><b>{errorCount}</b><span>lần bị khịa</span></div>
+                   </div>
+--- a/backend/server.js
++++ b/backend/server.js
+@@ -195,6 +195,10 @@
+ app.post("/api/turn", async (req, res) => {
+   try {
+     const { userId, sessionId, text, secondsSpoken = 0, silentCount = 0 } = req.body || {};
++    const measuredSeconds = Number(secondsSpoken);
++    const safeSecondsSpoken = Number.isFinite(measuredSeconds)
++      ? Math.max(0, Math.min(120, Math.round(measuredSeconds)))
++      : 0;
+     const session = await db.getSession(sessionId);
+     const user = await db.getUser(userId);
+     if (!session || !user) return res.status(404).json({ error: "unknown session/user" });
+@@ -224,7 +228,7 @@
+     // Persist the user turn (skip storing silence as a "spoken" turn's words)
+     await db.logTurn(sessionId, "user", content);
+     if (silentCount === 0) {
+-      await db.bumpSpoken(userId, sessionId, secondsSpoken, countWords(content));
++      await db.bumpSpoken(userId, sessionId, safeSecondsSpoken, countWords(content));
+     }
+ 
+     const system = buildSystemPrompt({
+@@ -302,6 +306,10 @@
+ const AZURE_KEY = process.env.AZURE_SPEECH_KEY;
+ const AZURE_REGION = process.env.AZURE_SPEECH_REGION || "southeastasia";
+ const AZURE_VOICE = process.env.AZURE_SPEECH_VOICE || "en-US-SaraNeural";
++const parsedSttThreshold = Number(process.env.STT_CONFIDENCE_THRESHOLD || "0.55");
++const STT_CONFIDENCE_THRESHOLD = Number.isFinite(parsedSttThreshold)
++  ? Math.max(0, Math.min(1, parsedSttThreshold))
++  : 0.55;
+ 
+ // Escape text so it's safe inside SSML/XML.
+ function xmlEscape(s) {
+@@ -384,10 +392,11 @@
+ app.post("/api/stt", async (req, res) => {
+   try {
+     if (!AZURE_KEY) return res.status(501).json({ error: "stt not configured" });
+-    const { audio, contentType } = req.body || {};
++    const { audio, contentType, userId, sessionId } = req.body || {};
+     if (!audio) return res.status(400).json({ error: "audio required" });
+ 
+     const buf = Buffer.from(audio, "base64");
++    if (!buf.length) return res.status(400).json({ error: "empty audio", code: "empty_audio" });
+     // Azure short-audio REST endpoint. Content-Type must match what the app records.
+     const ct = contentType || "audio/wav; codecs=audio/pcm; samplerate=16000";
+     const url =
+@@ -405,17 +414,38 @@
+     });
+     if (!r.ok) {
+       console.error("azure stt error", r.status, await r.text());
+-      return res.status(502).json({ error: "stt upstream" });
++      try { await db.recordSttAttempt(userId, sessionId, { retry: true }); } catch (metricErr) {
++        console.warn("stt metric error:", metricErr.message);
++      }
++      return res.status(502).json({ error: "stt upstream", code: "stt_upstream" });
+     }
+     const data = await r.json();
+-    const text =
+-      data.DisplayText ||
+-      (data.NBest && data.NBest[0] && data.NBest[0].Display) ||
+-      "";
+-    res.json({ text: text.trim(), status: data.RecognitionStatus || "Unknown" });
++    const best = Array.isArray(data.NBest) && data.NBest.length ? data.NBest[0] : null;
++    const text = String(data.DisplayText || best?.Display || "").trim();
++    const rawConfidence = Number(best?.Confidence);
++    const confidence = Number.isFinite(rawConfidence) ? Math.max(0, Math.min(1, rawConfidence)) : null;
++    const recognitionOk = data.RecognitionStatus === "Success" && !!text;
++    const lowConfidence = recognitionOk && confidence != null && confidence < STT_CONFIDENCE_THRESHOLD;
++    const mustRetry = !recognitionOk || lowConfidence;
++
++    try {
++      await db.recordSttAttempt(userId, sessionId, { retry: mustRetry, lowConfidence });
++    } catch (metricErr) {
++      console.warn("stt metric error:", metricErr.message);
++    }
++
++    res.json({
++      text,
++      confidence,
++      lowConfidence,
++      threshold: STT_CONFIDENCE_THRESHOLD,
++      status: data.RecognitionStatus || "Unknown",
++    });
+   } catch (e) {
+     console.error("stt error:", e.message);
+-    res.status(500).json({ error: "stt failed" });
++    const { userId, sessionId } = req.body || {};
++    try { await db.recordSttAttempt(userId, sessionId, { retry: true }); } catch {}
++    res.status(500).json({ error: "stt failed", code: "stt_failed" });
+   }
+ });
+ 
+--- a/backend/db.js
++++ b/backend/db.js
+@@ -26,6 +26,9 @@
+       total_sessions INTEGER NOT NULL DEFAULT 0,
+       total_seconds INTEGER NOT NULL DEFAULT 0,
+       total_words INTEGER NOT NULL DEFAULT 0,
++      stt_attempt_count INTEGER NOT NULL DEFAULT 0,
++      stt_retry_count INTEGER NOT NULL DEFAULT 0,
++      stt_low_confidence_count INTEGER NOT NULL DEFAULT 0,
+       job TEXT NOT NULL DEFAULT '',
+       email TEXT,
+       name TEXT
+@@ -36,7 +39,10 @@
+       session_number INTEGER NOT NULL,
+       started_at TEXT NOT NULL,
+       seconds_spoken INTEGER NOT NULL DEFAULT 0,
+-      words_spoken INTEGER NOT NULL DEFAULT 0
++      words_spoken INTEGER NOT NULL DEFAULT 0,
++      stt_attempt_count INTEGER NOT NULL DEFAULT 0,
++      stt_retry_count INTEGER NOT NULL DEFAULT 0,
++      stt_low_confidence_count INTEGER NOT NULL DEFAULT 0
+     );
+     CREATE TABLE IF NOT EXISTS turns (
+       id BIGSERIAL PRIMARY KEY,
+@@ -72,6 +78,12 @@
+   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS job TEXT NOT NULL DEFAULT ''");
+   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT");
+   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT");
++  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS stt_attempt_count INTEGER NOT NULL DEFAULT 0");
++  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS stt_retry_count INTEGER NOT NULL DEFAULT 0");
++  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS stt_low_confidence_count INTEGER NOT NULL DEFAULT 0");
++  await pool.query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS stt_attempt_count INTEGER NOT NULL DEFAULT 0");
++  await pool.query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS stt_retry_count INTEGER NOT NULL DEFAULT 0");
++  await pool.query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS stt_low_confidence_count INTEGER NOT NULL DEFAULT 0");
+   await pool.query("ALTER TABLE vocab ADD COLUMN IF NOT EXISTS situation_vi TEXT NOT NULL DEFAULT ''");
+ }
+ 
+@@ -168,6 +180,30 @@
+   );
+ }
+ 
++// Track every Azure STT attempt plus failures that force the learner to try again.
++// Low-confidence events are separate so the threshold can be calibrated from pilot data.
++async function recordSttAttempt(userId, sessionId, { retry = false, lowConfidence = false } = {}) {
++  if (!userId || !sessionId) return;
++  const retryN = retry ? 1 : 0;
++  const lowN = lowConfidence ? 1 : 0;
++  await pool.query(
++    `UPDATE sessions SET
++       stt_attempt_count = stt_attempt_count + 1,
++       stt_retry_count = stt_retry_count + $1,
++       stt_low_confidence_count = stt_low_confidence_count + $2
++     WHERE id = $3 AND user_id = $4`,
++    [retryN, lowN, sessionId, userId]
++  );
++  await pool.query(
++    `UPDATE users SET
++       stt_attempt_count = stt_attempt_count + 1,
++       stt_retry_count = stt_retry_count + $1,
++       stt_low_confidence_count = stt_low_confidence_count + $2
++     WHERE id = $3`,
++    [retryN, lowN, userId]
++  );
++}
++
+ async function saveVocab(userId, items) {
+   for (const v of items || []) {
+     if (v && v.word) {
+@@ -279,6 +315,9 @@
+          total_sessions = total_sessions + COALESCE((SELECT total_sessions FROM users WHERE id = $2), 0),
+          total_seconds  = total_seconds  + COALESCE((SELECT total_seconds  FROM users WHERE id = $2), 0),
+          total_words    = total_words    + COALESCE((SELECT total_words    FROM users WHERE id = $2), 0),
++         stt_attempt_count = stt_attempt_count + COALESCE((SELECT stt_attempt_count FROM users WHERE id = $2), 0),
++         stt_retry_count = stt_retry_count + COALESCE((SELECT stt_retry_count FROM users WHERE id = $2), 0),
++         stt_low_confidence_count = stt_low_confidence_count + COALESCE((SELECT stt_low_confidence_count FROM users WHERE id = $2), 0),
+          streak_days    = GREATEST(streak_days, COALESCE((SELECT streak_days FROM users WHERE id = $2), 0))
+        WHERE id = $1`,
+       [toId, fromId]
+@@ -324,6 +363,15 @@
+     "SELECT COUNT(DISTINCT s.user_id)::int AS n FROM sessions s WHERE s.words_spoken > 0"
+   ))[0].n;
+   const totalSessions = (await q("SELECT COUNT(*)::int AS n FROM sessions WHERE words_spoken > 0"))[0].n;
++  const voiceStats = (await q(`
++    SELECT
++      COALESCE(SUM(stt_attempt_count),0)::int AS attempts,
++      COALESCE(SUM(stt_retry_count),0)::int AS retries,
++      COALESCE(SUM(stt_low_confidence_count),0)::int AS low_confidence,
++      COALESCE(SUM(words_spoken),0)::int AS spoken_words,
++      COALESCE(SUM(seconds_spoken),0)::int AS spoken_seconds
++    FROM sessions
++  `))[0];
+ 
+   // Distinct active days per user (a "day" = a date on which they spoke a turn).
+   // We derive first day and the set of active days from turns of role 'user'.
+@@ -372,6 +420,11 @@
+     returnRatePercent: returnRate,
+     activeToday,
+     active7d,
++    sttAttemptCount: voiceStats.attempts,
++    sttRetryCount: voiceStats.retries,
++    sttRetryRatePercent: voiceStats.attempts ? Math.round((voiceStats.retries / voiceStats.attempts) * 100) : 0,
++    sttLowConfidenceCount: voiceStats.low_confidence,
++    totalActualSpeakingSeconds: voiceStats.spoken_seconds,
+   };
+ }
+ 
+@@ -379,7 +432,7 @@
+   init,
+   startSession, getSession, ensureUser, getUser,
+   logTurn, historyFor, logErrors, getErrorsForUser,
+-  bumpSpoken, saveVocab, getVocabForUser,
++  bumpSpoken, recordSttAttempt, saveVocab, getVocabForUser,
+   getWeaknesses, getProgress, getSessionErrorCount, getUserTurnsToday,
+   setJob,
+   getUserByEmail, linkIdentity, mergeUser, loginWithGoogle,

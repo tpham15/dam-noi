@@ -26,6 +26,9 @@ async function init() {
       total_sessions INTEGER NOT NULL DEFAULT 0,
       total_seconds INTEGER NOT NULL DEFAULT 0,
       total_words INTEGER NOT NULL DEFAULT 0,
+      stt_attempt_count INTEGER NOT NULL DEFAULT 0,
+      stt_retry_count INTEGER NOT NULL DEFAULT 0,
+      stt_low_confidence_count INTEGER NOT NULL DEFAULT 0,
       job TEXT NOT NULL DEFAULT '',
       email TEXT,
       name TEXT
@@ -36,7 +39,10 @@ async function init() {
       session_number INTEGER NOT NULL,
       started_at TEXT NOT NULL,
       seconds_spoken INTEGER NOT NULL DEFAULT 0,
-      words_spoken INTEGER NOT NULL DEFAULT 0
+      words_spoken INTEGER NOT NULL DEFAULT 0,
+      stt_attempt_count INTEGER NOT NULL DEFAULT 0,
+      stt_retry_count INTEGER NOT NULL DEFAULT 0,
+      stt_low_confidence_count INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS turns (
       id BIGSERIAL PRIMARY KEY,
@@ -72,6 +78,12 @@ async function init() {
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS job TEXT NOT NULL DEFAULT ''");
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT");
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS stt_attempt_count INTEGER NOT NULL DEFAULT 0");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS stt_retry_count INTEGER NOT NULL DEFAULT 0");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS stt_low_confidence_count INTEGER NOT NULL DEFAULT 0");
+  await pool.query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS stt_attempt_count INTEGER NOT NULL DEFAULT 0");
+  await pool.query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS stt_retry_count INTEGER NOT NULL DEFAULT 0");
+  await pool.query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS stt_low_confidence_count INTEGER NOT NULL DEFAULT 0");
   await pool.query("ALTER TABLE vocab ADD COLUMN IF NOT EXISTS situation_vi TEXT NOT NULL DEFAULT ''");
 }
 
@@ -165,6 +177,30 @@ async function bumpSpoken(userId, sessionId, seconds, words) {
   await pool.query(
     "UPDATE users SET total_seconds = total_seconds + $1, total_words = total_words + $2 WHERE id = $3",
     [seconds, words, userId]
+  );
+}
+
+// Track every Azure STT attempt plus failures that force the learner to try again.
+// Low-confidence events are separate so the threshold can be calibrated from pilot data.
+async function recordSttAttempt(userId, sessionId, { retry = false, lowConfidence = false } = {}) {
+  if (!userId || !sessionId) return;
+  const retryN = retry ? 1 : 0;
+  const lowN = lowConfidence ? 1 : 0;
+  await pool.query(
+    `UPDATE sessions SET
+       stt_attempt_count = stt_attempt_count + 1,
+       stt_retry_count = stt_retry_count + $1,
+       stt_low_confidence_count = stt_low_confidence_count + $2
+     WHERE id = $3 AND user_id = $4`,
+    [retryN, lowN, sessionId, userId]
+  );
+  await pool.query(
+    `UPDATE users SET
+       stt_attempt_count = stt_attempt_count + 1,
+       stt_retry_count = stt_retry_count + $1,
+       stt_low_confidence_count = stt_low_confidence_count + $2
+     WHERE id = $3`,
+    [retryN, lowN, userId]
   );
 }
 
@@ -279,6 +315,9 @@ async function mergeUser(fromId, toId) {
          total_sessions = total_sessions + COALESCE((SELECT total_sessions FROM users WHERE id = $2), 0),
          total_seconds  = total_seconds  + COALESCE((SELECT total_seconds  FROM users WHERE id = $2), 0),
          total_words    = total_words    + COALESCE((SELECT total_words    FROM users WHERE id = $2), 0),
+         stt_attempt_count = stt_attempt_count + COALESCE((SELECT stt_attempt_count FROM users WHERE id = $2), 0),
+         stt_retry_count = stt_retry_count + COALESCE((SELECT stt_retry_count FROM users WHERE id = $2), 0),
+         stt_low_confidence_count = stt_low_confidence_count + COALESCE((SELECT stt_low_confidence_count FROM users WHERE id = $2), 0),
          streak_days    = GREATEST(streak_days, COALESCE((SELECT streak_days FROM users WHERE id = $2), 0))
        WHERE id = $1`,
       [toId, fromId]
@@ -324,6 +363,15 @@ async function getAdminStats() {
     "SELECT COUNT(DISTINCT s.user_id)::int AS n FROM sessions s WHERE s.words_spoken > 0"
   ))[0].n;
   const totalSessions = (await q("SELECT COUNT(*)::int AS n FROM sessions WHERE words_spoken > 0"))[0].n;
+  const voiceStats = (await q(`
+    SELECT
+      COALESCE(SUM(stt_attempt_count),0)::int AS attempts,
+      COALESCE(SUM(stt_retry_count),0)::int AS retries,
+      COALESCE(SUM(stt_low_confidence_count),0)::int AS low_confidence,
+      COALESCE(SUM(words_spoken),0)::int AS spoken_words,
+      COALESCE(SUM(seconds_spoken),0)::int AS spoken_seconds
+    FROM sessions
+  `))[0];
 
   // Distinct active days per user (a "day" = a date on which they spoke a turn).
   // We derive first day and the set of active days from turns of role 'user'.
@@ -372,14 +420,20 @@ async function getAdminStats() {
     returnRatePercent: returnRate,
     activeToday,
     active7d,
+    sttAttemptCount: voiceStats.attempts,
+    sttRetryCount: voiceStats.retries,
+    sttRetryRatePercent: voiceStats.attempts ? Math.round((voiceStats.retries / voiceStats.attempts) * 100) : 0,
+    sttLowConfidenceCount: voiceStats.low_confidence,
+    totalActualSpeakingSeconds: voiceStats.spoken_seconds,
   };
 }
 
 module.exports = {
+  pool,
   init,
   startSession, getSession, ensureUser, getUser,
   logTurn, historyFor, logErrors, getErrorsForUser,
-  bumpSpoken, saveVocab, getVocabForUser,
+  bumpSpoken, recordSttAttempt, saveVocab, getVocabForUser,
   getWeaknesses, getProgress, getSessionErrorCount, getUserTurnsToday,
   setJob,
   getUserByEmail, linkIdentity, mergeUser, loginWithGoogle,
